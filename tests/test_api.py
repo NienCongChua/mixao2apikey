@@ -233,6 +233,50 @@ async def test_chat_completions_forward_params(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_forward_tool_params(client):
+    mock_client = AsyncMock()
+    mock_client.chat_completion = AsyncMock(
+        return_value={
+            "id": "chatcmpl-x",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "mimo-v2.5-pro",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+            ],
+            "usage": {},
+        }
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run shell commands",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    with patch.object(client_manager, "get_client", return_value=mock_client):
+        await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mimo-v2.5-pro",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "tools": tools,
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+            },
+        )
+
+    _, kwargs = mock_client.chat_completion.call_args
+    assert kwargs["tools"] == tools
+    assert kwargs["tool_choice"] == "auto"
+    assert kwargs["parallel_tool_calls"] is True
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_upstream_error(client):
     mock_client = AsyncMock()
     mock_client.chat_completion = AsyncMock(side_effect=Exception("upstream timeout"))

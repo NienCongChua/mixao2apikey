@@ -15,6 +15,9 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     model: str = "mimo-v2.5-pro"
     messages: List[ChatMessage]
+    tools: Optional[List[dict]] = None
+    tool_choice: Optional[Union[str, dict]] = None
+    parallel_tool_calls: Optional[bool] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 0.95
     max_tokens: Optional[int] = 4096

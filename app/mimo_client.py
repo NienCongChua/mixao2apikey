@@ -1,9 +1,13 @@
 import asyncio
+import glob as globlib
 import json
 import logging
+import re
+import shlex
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -16,6 +20,7 @@ from app.utils import (
     parse_cookies_from_string,
     parse_stream_chunk,
     parse_xml_tool_call,
+    strip_xml_tool_calls,
 )
 
 
@@ -34,6 +39,12 @@ THINK_START = "<think>\x00"
 THINK_END = "</think>\x00"
 MAX_AUTO_TOOL_ROUNDS = 3
 TOOL_TIMEOUT_SECONDS = 120
+TOOL_OUTPUT_MAX_CHARS = 20000
+SHELL_TOOL_NAMES = {"bash", "sh", "shell", "terminal", "run_command"}
+DIRECT_SHELL_TOOLS = {"whoami", "date", "pwd", "ls", "uname", "git"}
+TIME_TOOL_NAMES = {"time", "get_time", "get_current_time", "current_time"}
+READ_TOOL_NAMES = {"read", "read_file", "file_read", "cat"}
+GLOB_TOOL_NAMES = {"glob", "glob_files", "find_files"}
 
 
 class _ReasoningStreamParser:
@@ -75,6 +86,80 @@ class _ReasoningStreamParser:
             break
 
         return [(part, reasoning) for part, reasoning in output if part]
+
+
+_TOOL_CALL_TAG_RE = re.compile(r"</?tool_?call\s*>", re.IGNORECASE)
+_TOOL_CALL_START_RE = re.compile(r"<tool_?call\s*>", re.IGNORECASE)
+_TOOL_CALL_PREFIXES = ("<tool_call", "<toolcall")
+_TOOL_CALL_TAG_TAIL_LENGTH = len("</tool_call>") - 1
+
+
+class _ToolCallStreamFilter:
+    """Hide XML-like tool-call blocks while preserving normal streaming text."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.depth = 0
+        self.emitted = False
+
+    def feed(self, text: str, final: bool = False) -> list[str]:
+        self.buffer += text
+        output: list[str] = []
+
+        while self.buffer:
+            if self.depth:
+                match = _TOOL_CALL_TAG_RE.search(self.buffer)
+                if not match:
+                    if final:
+                        self.buffer = ""
+                    else:
+                        keep = min(len(self.buffer), _TOOL_CALL_TAG_TAIL_LENGTH)
+                        self.buffer = self.buffer[-keep:]
+                    break
+
+                if match.group(0).startswith("</"):
+                    self.depth = max(0, self.depth - 1)
+                else:
+                    self.depth += 1
+                self.buffer = self.buffer[match.end():]
+                continue
+
+            start_match = _TOOL_CALL_START_RE.search(self.buffer)
+            if start_match:
+                self._emit(output, self.buffer[:start_match.start()])
+                self.depth = 1
+                self.buffer = self.buffer[start_match.end():]
+                continue
+
+            if final:
+                self._emit(output, self.buffer)
+                self.buffer = ""
+                break
+
+            keep = self._tool_prefix_suffix_length(self.buffer)
+            emit_length = len(self.buffer) - keep
+            if emit_length:
+                self._emit(output, self.buffer[:emit_length])
+                self.buffer = self.buffer[emit_length:]
+            break
+
+        return output
+
+    def _emit(self, output: list[str], text: str) -> None:
+        if text:
+            output.append(text)
+            self.emitted = True
+
+    @staticmethod
+    def _tool_prefix_suffix_length(text: str) -> int:
+        lowered = text.lower()
+        max_length = 0
+        for prefix in _TOOL_CALL_PREFIXES:
+            limit = min(len(prefix), len(lowered))
+            for length in range(1, limit + 1):
+                if lowered.endswith(prefix[:length]):
+                    max_length = max(max_length, length)
+        return max_length
 
 
 class MimoWebClient:
@@ -155,14 +240,123 @@ class MimoWebClient:
             return "\n".join(part for part in parts if part)
         return str(content)
 
+    @staticmethod
+    def _tool_schema_name(tool: dict) -> str:
+        if not isinstance(tool, dict):
+            return ""
+        function = tool.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "").strip()
+        return str(tool.get("name") or "").strip()
+
+    @staticmethod
+    def _tool_schema_description(tool: dict) -> str:
+        if not isinstance(tool, dict):
+            return ""
+        function = tool.get("function")
+        if isinstance(function, dict):
+            return str(function.get("description") or "").strip()
+        return str(tool.get("description") or "").strip()
+
     @classmethod
-    def _messages_to_query(cls, messages: list[dict]) -> str:
+    def _format_tool_instructions(
+        cls,
+        tools: Optional[list[dict]],
+        tool_choice: object = None,
+        parallel_tool_calls: Optional[bool] = None,
+    ) -> str:
+        if not tools and tool_choice in (None, "none"):
+            return ""
+
+        tool_lines = []
+        seen = set()
+        for tool in tools or []:
+            name = cls._tool_schema_name(tool)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            description = cls._tool_schema_description(tool)
+            if description:
+                tool_lines.append(f"- {name}: {description}")
+            else:
+                tool_lines.append(f"- {name}")
+
+        fallback_tools = [
+            "bash",
+            "read",
+            "glob",
+            "whoami",
+            "date",
+            "pwd",
+            "ls",
+            "uname",
+            "git",
+        ]
+        for name in fallback_tools:
+            if name not in seen:
+                tool_lines.append(f"- {name}")
+                seen.add(name)
+
+        parallel_text = (
+            "You may emit multiple adjacent tool_call blocks when independent "
+            "tool calls can run in parallel."
+            if parallel_tool_calls is not False
+            else "Emit only one tool_call block at a time."
+        )
+
+        return (
+            "System tool-calling instructions:\n"
+            "When you need external information, filesystem access, shell "
+            "commands, git, time, or environment inspection, do not write the "
+            "command as plain text. Instead output tool calls only, using this "
+            "exact XML-like format:\n"
+            "<tool_call>\n"
+            "<function=bash>\n"
+            "<parameter=command>git status --short</parameter>\n"
+            "<parameter=description>Check repository status</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n\n"
+            "For direct tools with no arguments, use an empty function body, "
+            "for example:\n"
+            "<tool_call>\n"
+            "<function=pwd>\n"
+            "</function>\n"
+            "</tool_call>\n\n"
+            "For file reads and globbing, use parameters like:\n"
+            "<tool_call><function=read><parameter=path>app/main.py</parameter>"
+            "</function></tool_call>\n"
+            "<tool_call><function=glob><parameter=pattern>**/*.py</parameter>"
+            "</function></tool_call>\n\n"
+            "Do not wrap tool calls in Markdown fences. Do not explain the "
+            "tool call before emitting it. After tool results are returned, "
+            "continue from the results.\n"
+            f"{parallel_text}\n"
+            "Available tools:\n"
+            + "\n".join(tool_lines)
+        )
+
+    @classmethod
+    def _messages_to_query(
+        cls,
+        messages: list[dict],
+        tools: Optional[list[dict]] = None,
+        tool_choice: object = None,
+        parallel_tool_calls: Optional[bool] = None,
+    ) -> str:
         """
         MiMo accepts one query and stores history server-side. OpenAI callers
         send their full history, so serialize it into a fresh, stateless MiMo
         conversation for each request.
         """
         rendered = []
+        tool_instructions = cls._format_tool_instructions(
+            tools,
+            tool_choice,
+            parallel_tool_calls,
+        )
+        if tool_instructions:
+            rendered.append(f"System:\n{tool_instructions}")
+
         labels = {
             "system": "System",
             "user": "User",
@@ -182,7 +376,7 @@ class MimoWebClient:
         if not rendered:
             raise ValueError("At least one non-empty message is required")
 
-        if len(rendered) == 1 and messages[-1].get("role") == "user":
+        if not tool_instructions and len(rendered) == 1 and messages[-1].get("role") == "user":
             return cls._content_to_text(messages[-1].get("content"))
 
         return "\n\n".join(rendered) + "\n\nAssistant:"
@@ -213,7 +407,12 @@ class MimoWebClient:
         payload = {
             "msgId": str(uuid.uuid4()),
             "conversationId": str(uuid.uuid4()),
-            "query": self._messages_to_query(messages),
+            "query": self._messages_to_query(
+                messages,
+                params.get("tools"),
+                params.get("tool_choice"),
+                params.get("parallel_tool_calls"),
+            ),
             "isEditedQuery": False,
             "modelConfig": model_config,
             "multiMedias": [],
@@ -354,19 +553,167 @@ class MimoWebClient:
             return {}
         return value if isinstance(value, dict) else {}
 
+    @staticmethod
+    def _tool_arg(args: dict, *names: str) -> str:
+        for name in names:
+            value = args.get(name)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _tool_int_arg(args: dict, default: int, *names: str) -> int:
+        text = MimoWebClient._tool_arg(args, *names)
+        if not text:
+            return default
+        try:
+            return int(text)
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _truncate_tool_output(content: str) -> str:
+        if len(content) <= TOOL_OUTPUT_MAX_CHARS:
+            return content
+        omitted = len(content) - TOOL_OUTPUT_MAX_CHARS
+        return (
+            content[:TOOL_OUTPUT_MAX_CHARS]
+            + f"\n[tool output truncated: {omitted} characters omitted]"
+        )
+
+    @classmethod
+    def _build_shell_command(cls, name: str, args: dict) -> str:
+        normalized = name.strip().lower()
+        if normalized in TIME_TOOL_NAMES:
+            return "date"
+
+        if normalized in SHELL_TOOL_NAMES:
+            return cls._tool_arg(
+                args,
+                "command",
+                "cmd",
+                "script",
+                "code",
+                "input",
+                "query",
+            )
+
+        if normalized not in DIRECT_SHELL_TOOLS:
+            return ""
+
+        command_arg = cls._tool_arg(args, "command", "cmd")
+        if command_arg:
+            if command_arg.lower().startswith(normalized):
+                return command_arg
+            if normalized == "git":
+                return f"git {command_arg}"
+            return f"{normalized} {command_arg}"
+
+        parts = [normalized]
+        option_text = cls._tool_arg(args, "args", "arguments", "flags", "options")
+        if option_text:
+            parts.append(option_text)
+
+        path = cls._tool_arg(args, "path", "dir", "directory", "file", "file_path")
+        if path and normalized in {"ls"}:
+            parts.append(shlex.quote(path))
+
+        return " ".join(parts)
+
+    @classmethod
+    def _read_tool_content(cls, args: dict) -> str:
+        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        if not file_path:
+            return "Tool execution failed: missing path parameter."
+
+        path = Path(file_path).expanduser()
+        start_line = max(1, cls._tool_int_arg(args, 1, "start_line", "offset", "line"))
+        line_limit = max(1, cls._tool_int_arg(args, 2000, "limit", "lines", "line_limit"))
+
+        lines = [f"$ read {shlex.quote(str(path))}"]
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as file:
+                emitted = 0
+                for line_number, line in enumerate(file, start=1):
+                    if line_number < start_line:
+                        continue
+                    if emitted >= line_limit:
+                        lines.append(
+                            f"[read output truncated after {line_limit} lines]"
+                        )
+                        break
+                    lines.append(line.rstrip("\n"))
+                    emitted += 1
+        except OSError as exc:
+            lines.append(f"Tool execution failed: {exc}")
+
+        return cls._truncate_tool_output("\n".join(lines))
+
+    @classmethod
+    def _glob_tool_content(cls, args: dict) -> str:
+        pattern = cls._tool_arg(args, "pattern", "glob", "path", "query")
+        if not pattern:
+            return "Tool execution failed: missing pattern parameter."
+
+        root = cls._tool_arg(args, "cwd", "root", "directory", "dir")
+        if root and not Path(pattern).is_absolute():
+            pattern = str(Path(root).expanduser() / pattern)
+        else:
+            pattern = str(Path(pattern).expanduser())
+
+        limit = max(1, cls._tool_int_arg(args, 200, "limit", "max_results"))
+        matches = sorted(globlib.glob(pattern, recursive=True))
+        visible_matches = matches[:limit]
+
+        lines = [f"$ glob {shlex.quote(pattern)}"]
+        lines.extend(visible_matches)
+        if len(matches) > limit:
+            lines.append(
+                f"[glob output truncated: {len(matches) - limit} matches omitted]"
+            )
+        if not matches:
+            lines.append("[no matches]")
+        return cls._truncate_tool_output("\n".join(lines))
+
     async def _execute_tool_call(self, tool_call: dict) -> dict:
-        name = tool_call.get("function", {}).get("name", "")
+        name = str(tool_call.get("function", {}).get("name", "")).strip()
+        normalized_name = name.lower()
         args = self._tool_call_arguments(tool_call)
-        command = str(args.get("command", "")).strip()
         description = str(args.get("description", "")).strip()
 
         lines = []
         if description:
             lines.append(f"# {description}")
+
+        if normalized_name in READ_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._read_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in GLOB_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._glob_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        command = self._build_shell_command(name, args)
         if command:
             lines.append(f"$ {command}")
 
-        if name != "bash":
+        supported_shell = (
+            normalized_name in SHELL_TOOL_NAMES
+            or normalized_name in DIRECT_SHELL_TOOLS
+            or normalized_name in TIME_TOOL_NAMES
+        )
+        if not supported_shell:
             lines.append(f"Tool execution failed: unsupported tool '{name}'.")
         elif not command:
             lines.append("Tool execution failed: missing command parameter.")
@@ -398,14 +745,26 @@ class MimoWebClient:
                 if process.returncode:
                     lines.append(f"[exit code {process.returncode}]")
 
+        content = self._truncate_tool_output("\n".join(lines))
         return {
             "role": "tool",
             "tool_call_id": tool_call.get("id"),
-            "content": "\n".join(lines),
+            "content": content,
         }
 
     async def _execute_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
-        return [await self._execute_tool_call(tool_call) for tool_call in tool_calls]
+        return await asyncio.gather(
+            *(self._execute_tool_call(tool_call) for tool_call in tool_calls)
+        )
+
+    @staticmethod
+    def _assistant_tool_message(content: str, tool_calls: list[dict]) -> dict:
+        visible_content = strip_xml_tool_calls(content)
+        return {
+            "role": "assistant",
+            "content": visible_content or None,
+            "tool_calls": tool_calls,
+        }
 
     async def _non_stream_chat(
         self,
@@ -462,11 +821,7 @@ class MimoWebClient:
                 tool_results = await self._execute_tool_calls(tool_calls)
                 followup_messages = [
                     *messages,
-                    {
-                        "role": "assistant",
-                        "content": content,
-                        "tool_calls": tool_calls,
-                    },
+                    self._assistant_tool_message(content, tool_calls),
                     *tool_results,
                 ]
                 followup_payload = self._build_payload(
@@ -513,31 +868,7 @@ class MimoWebClient:
             usage = None
             content_parts = []
             reasoning_parts = []
-            content_buffer = ""
-            content_emitted = False
-            tool_prefixes = ("<tool_call", "<toolcall")
-
-            def visible_content_chunks(part: str) -> list[str]:
-                nonlocal content_buffer, content_emitted
-                if content_emitted:
-                    return [part] if part else []
-
-                content_buffer += part
-                stripped = content_buffer.lstrip()
-                if not stripped:
-                    return []
-
-                looks_like_tool_prefix = any(
-                    prefix.startswith(stripped) or stripped.startswith(prefix)
-                    for prefix in tool_prefixes
-                )
-                if looks_like_tool_prefix:
-                    return []
-
-                content_emitted = True
-                output = content_buffer
-                content_buffer = ""
-                return [output] if output else []
+            visible_filter = _ToolCallStreamFilter()
 
             async with self._client.stream(
                 "POST",
@@ -558,7 +889,7 @@ class MimoWebClient:
                             if is_reasoning:
                                 yield parse_stream_chunk({"reasoning": part}, model)
                             else:
-                                for chunk in visible_content_chunks(part):
+                                for chunk in visible_filter.feed(part):
                                     yield parse_stream_chunk({"content": chunk}, model)
                     elif event == "usage":
                         usage = self._normalize_usage(data)
@@ -573,23 +904,22 @@ class MimoWebClient:
                 if is_reasoning:
                     yield parse_stream_chunk({"reasoning": part}, model)
                 else:
-                    for chunk in visible_content_chunks(part):
+                    for chunk in visible_filter.feed(part):
                         yield parse_stream_chunk({"content": chunk}, model)
+
+            for chunk in visible_filter.feed("", final=True):
+                yield parse_stream_chunk({"content": chunk}, model)
 
             content = "".join(content_parts)
             tool_calls = parse_xml_tool_call(content)
 
             await asyncio.to_thread(usage_tracker.record, self.name, model, usage, True)
 
-            if tool_calls and not content_emitted and tool_round < MAX_AUTO_TOOL_ROUNDS:
+            if tool_calls and tool_round < MAX_AUTO_TOOL_ROUNDS:
                 tool_results = await self._execute_tool_calls(tool_calls)
                 followup_messages = [
                     *messages,
-                    {
-                        "role": "assistant",
-                        "content": content,
-                        "tool_calls": tool_calls,
-                    },
+                    self._assistant_tool_message(content, tool_calls),
                     *tool_results,
                 ]
                 followup_payload = self._build_payload(
@@ -606,7 +936,7 @@ class MimoWebClient:
                     yield chunk
                 return
 
-            if tool_calls and not content_emitted:
+            if tool_calls:
                 stream_tool_calls = []
                 for index, tool_call in enumerate(tool_calls):
                     stream_tool_calls.append({"index": index, **tool_call})
@@ -625,9 +955,6 @@ class MimoWebClient:
                     }],
                 }
                 finish_reason = "tool_calls"
-            elif not content_emitted and content_buffer:
-                yield parse_stream_chunk({"content": content_buffer}, model)
-                finish_reason = "stop"
             else:
                 finish_reason = "stop"
 

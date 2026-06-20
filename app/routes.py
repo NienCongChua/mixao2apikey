@@ -85,6 +85,12 @@ async def chat_completions(
         "presence_penalty": request.presence_penalty,
     }
 
+    if request.tools:
+        kwargs["tools"] = request.tools
+    if request.tool_choice is not None:
+        kwargs["tool_choice"] = request.tool_choice
+    if request.parallel_tool_calls is not None:
+        kwargs["parallel_tool_calls"] = request.parallel_tool_calls
     if request.reasoning_effort:
         kwargs["reasoning_effort"] = request.reasoning_effort
     if request.thinking is not None:

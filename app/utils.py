@@ -8,29 +8,34 @@ import time
 import uuid
 import logging
 import re
+from html import unescape
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _TOOL_CALL_FUNCTION_RE = re.compile(
-    r"<tool_call>\s*<function=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>\s*</tool_call>",
-    re.DOTALL,
+    r"<tool_?call>\s*<function\s*=\s*([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>\s*</tool_?call>",
+    re.DOTALL | re.IGNORECASE,
 )
 _TOOL_CALL_NAMED_RE = re.compile(
-    r"<tool_call>\s*<name>\s*([^<]+?)\s*</name>\s*<arguments>\s*(.*?)\s*</arguments>\s*</tool_call>",
-    re.DOTALL,
+    r"<tool_?call>\s*<name>\s*([^<]+?)\s*</name>\s*<arguments>\s*(.*?)\s*</arguments>\s*</tool_?call>",
+    re.DOTALL | re.IGNORECASE,
 )
 _TOOL_CALL_JSON_RE = re.compile(
     r"<tool_?call>\s*(\{.*?\})\s*</tool_?call>",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 _TOOL_PARAMETER_RE = re.compile(
-    r"<parameter=([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
-    re.DOTALL,
+    r"<parameter\s*=\s*([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
+    re.DOTALL | re.IGNORECASE,
 )
 _TOOL_ARGUMENT_TAG_RE = re.compile(
     r"<([A-Za-z0-9_.:-]+)>(.*?)</\1>",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
+)
+_TOOL_CALL_TAG_RE = re.compile(
+    r"</?tool_?call\s*>",
+    re.IGNORECASE,
 )
 
 
@@ -48,45 +53,113 @@ def parse_xml_tool_call(content: str) -> Optional[list[dict]]:
     if not content:
         return None
 
-    match = _TOOL_CALL_FUNCTION_RE.search(content)
-    if match:
+    parsed: list[tuple[int, tuple[int, int], dict]] = []
+
+    for match in _TOOL_CALL_FUNCTION_RE.finditer(content):
         function_name, body = match.groups()
         params = _parse_tool_parameters(body, _TOOL_PARAMETER_RE)
-        if params is None:
-            return None
-        return [_build_tool_call(function_name, params)]
+        if params is None and not body.strip():
+            params = {}
+        if params is not None:
+            parsed.append((
+                match.start(),
+                match.span(),
+                _build_tool_call(function_name, params),
+            ))
 
-    match = _TOOL_CALL_NAMED_RE.search(content)
-    if match:
+    for match in _TOOL_CALL_NAMED_RE.finditer(content):
+        if _overlaps(match.span(), [span for _, span, _ in parsed]):
+            continue
         function_name, body = match.groups()
         params = _parse_tool_parameters(body, _TOOL_ARGUMENT_TAG_RE)
-        if params is None:
-            return None
-        return [_build_tool_call(function_name.strip(), params)]
+        if params is None and not body.strip():
+            params = {}
+        if params is not None:
+            parsed.append((
+                match.start(),
+                match.span(),
+                _build_tool_call(function_name.strip(), params),
+            ))
 
-    match = _TOOL_CALL_JSON_RE.search(content)
-    if match:
+    for match in _TOOL_CALL_JSON_RE.finditer(content):
+        if _overlaps(match.span(), [span for _, span, _ in parsed]):
+            continue
         try:
             payload = json.loads(match.group(1))
         except json.JSONDecodeError:
-            return None
+            continue
         if not isinstance(payload, dict):
-            return None
-        function_name = payload.get("name") or payload.get("function")
+            continue
+        function_name = payload.get("name")
         arguments = payload.get("arguments") or {}
+        function_payload = payload.get("function")
+        if isinstance(function_payload, dict):
+            function_name = function_name or function_payload.get("name")
+            arguments = function_payload.get("arguments", arguments)
+        elif function_payload:
+            function_name = function_name or function_payload
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                return None
+                continue
         if not function_name or not isinstance(arguments, dict):
-            return None
-        return [_build_tool_call(str(function_name), {
-            str(key): str(value)
-            for key, value in arguments.items()
-        })]
+            continue
+        parsed.append((
+            match.start(),
+            match.span(),
+            _build_tool_call(str(function_name), {
+                str(key): str(value)
+                for key, value in arguments.items()
+            }),
+        ))
 
-    return None
+    if not parsed:
+        return None
+
+    parsed.sort(key=lambda item: item[0])
+    return [tool_call for _, _, tool_call in parsed]
+
+
+def strip_xml_tool_calls(content: str) -> str:
+    """Remove complete tool-call blocks from assistant text."""
+    if not content:
+        return ""
+
+    spans = _outer_tool_call_spans(content)
+    if not spans:
+        return content
+
+    parts = []
+    previous = 0
+    for start, end in spans:
+        parts.append(content[previous:start])
+        previous = end
+    parts.append(content[previous:])
+
+    stripped = "".join(parts)
+    stripped = re.sub(r"[ \t]+\n", "\n", stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+    return stripped.strip()
+
+
+def _outer_tool_call_spans(content: str) -> list[tuple[int, int]]:
+    spans = []
+    stack: list[re.Match] = []
+    for match in _TOOL_CALL_TAG_RE.finditer(content):
+        is_closing = match.group(0).startswith("</")
+        if not is_closing:
+            stack.append(match)
+        elif stack:
+            opening = stack.pop()
+            if not stack:
+                spans.append((opening.start(), match.end()))
+    return spans
+
+
+def _overlaps(span: tuple[int, int], existing: list[tuple[int, int]]) -> bool:
+    start, end = span
+    return any(start < other_end and end > other_start for other_start, other_end in existing)
 
 
 def _parse_tool_parameters(body: str, pattern: re.Pattern) -> Optional[dict[str, str]]:
@@ -94,7 +167,7 @@ def _parse_tool_parameters(body: str, pattern: re.Pattern) -> Optional[dict[str,
     consumed_spans = []
     for param_match in pattern.finditer(body):
         key, value = param_match.groups()
-        params[key] = value.strip()
+        params[key] = unescape(value.strip())
         consumed_spans.append(param_match.span())
 
     if not params:

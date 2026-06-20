@@ -294,8 +294,11 @@ When MiMo returns a recognized tool-call block, the server:
 Runtime limits:
 
 <table>
-  <tr><td>Supported tool</td><td><code>bash</code></td></tr>
+  <tr><td>Shell tools</td><td><code>bash</code>, <code>sh</code>, <code>shell</code>, <code>terminal</code>, <code>run_command</code></td></tr>
+  <tr><td>Direct shell aliases</td><td><code>whoami</code>, <code>date</code>, <code>pwd</code>, <code>ls</code>, <code>uname</code>, <code>git</code>, <code>get_time</code></td></tr>
+  <tr><td>File tools</td><td><code>read</code>, <code>read_file</code>, <code>glob</code>, <code>glob_files</code></td></tr>
   <tr><td>Timeout</td><td><code>120</code> seconds per command</td></tr>
+  <tr><td>Output cap</td><td><code>20000</code> characters per tool result</td></tr>
   <tr><td>Max rounds</td><td><code>3</code> automatic tool rounds per request</td></tr>
 </table>
 

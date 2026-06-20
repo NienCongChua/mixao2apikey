@@ -1,11 +1,13 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
 from app.mimo_client import MimoWebClient, _ReasoningStreamParser, MIMO_MODELS
-from app.utils import parse_curl_command, parse_xml_tool_call
+from app.utils import parse_curl_command, parse_xml_tool_call, strip_xml_tool_calls
 
 
 class CurlParserTests(unittest.TestCase):
@@ -44,6 +46,36 @@ class ToolCallParserTests(unittest.TestCase):
         self.assertEqual(
             json.loads(tool_call["function"]["arguments"]),
             {"command": "whoami", "description": "Get current user"},
+        )
+
+    def test_parses_multiple_adjacent_mimo_xml_tool_calls(self):
+        tool_calls = parse_xml_tool_call(
+            '<tool_call>\n'
+            '<function=bash>\n'
+            '<parameter=command>ls -la /tmp</parameter>\n'
+            '<parameter=description>List temp</parameter>\n'
+            '</function>\n'
+            '</tool_call>'
+            '<tool_call>\n'
+            '<function=bash>\n'
+            '<parameter=command>find /tmp -maxdepth 1 -type f | head</parameter>\n'
+            '<parameter=description>Find temp files</parameter>\n'
+            '</function>\n'
+            '</tool_call>'
+        )
+
+        self.assertIsNotNone(tool_calls)
+        self.assertEqual(len(tool_calls), 2)
+        self.assertEqual(
+            json.loads(tool_calls[0]["function"]["arguments"]),
+            {"command": "ls -la /tmp", "description": "List temp"},
+        )
+        self.assertEqual(
+            json.loads(tool_calls[1]["function"]["arguments"]),
+            {
+                "command": "find /tmp -maxdepth 1 -type f | head",
+                "description": "Find temp files",
+            },
         )
 
     def test_parses_embedded_mimo_xml_tool_call(self):
@@ -121,8 +153,38 @@ class ToolCallParserTests(unittest.TestCase):
             {"command": "echo ok"},
         )
 
+    def test_parses_empty_direct_tool_call(self):
+        tool_calls = parse_xml_tool_call(
+            '<tool_call>\n'
+            '<function=pwd>\n'
+            '</function>\n'
+            '</tool_call>'
+        )
+
+        self.assertIsNotNone(tool_calls)
+        self.assertEqual(tool_calls[0]["function"]["name"], "pwd")
+        self.assertEqual(
+            json.loads(tool_calls[0]["function"]["arguments"]),
+            {},
+        )
+
     def test_ignores_regular_content(self):
         self.assertIsNone(parse_xml_tool_call("Hello"))
+
+    def test_strips_tool_calls_from_visible_content(self):
+        content = (
+            "I will inspect this.\n"
+            "<tool_call>\n"
+            "<function=bash>\n"
+            "<parameter=command>pwd</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "Then I will summarize."
+        )
+
+        self.assertNotIn("<tool_call>", strip_xml_tool_calls(content))
+        self.assertIn("I will inspect this.", strip_xml_tool_calls(content))
+        self.assertIn("Then I will summarize.", strip_xml_tool_calls(content))
 
 
 class ReasoningParserTests(unittest.TestCase):
@@ -231,6 +293,62 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
             True,
         )
 
+    async def test_stream_response_executes_tool_call_after_preamble(self):
+        first_sse = b"".join([
+            (
+                b'event: message\n'
+                b'data: {"content":"I will inspect this.\\n<tool_call>\\n'
+                b'<function=bash>\\n"}\n\n'
+            ),
+            (
+                b'event: message\n'
+                b'data: {"content":"<parameter=command>printf streamed</parameter>\\n'
+                b'<parameter=description>Run streamed command</parameter>\\n'
+                b'</function>\\n</tool_call>"}\n\n'
+            ),
+            b"event: finish\ndata: {}\n\n",
+        ])
+        second_sse = b"".join([
+            b'event: message\ndata: {"content":"Tool finished: streamed"}\n\n',
+            b"event: finish\ndata: {}\n\n",
+        ])
+        seen_payloads = []
+
+        async def handler(request):
+            payload = json.loads(request.content)
+            seen_payloads.append(payload)
+            content = first_sse if len(seen_payloads) == 1 else second_sse
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content,
+            )
+
+        await self.client._client.aclose()
+        self.client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        stream = await self.client.chat_completion(
+            [{"role": "user", "content": "Hi"}],
+            model="mimo-v2-flash",
+            stream=True,
+        )
+        chunks = [chunk async for chunk in stream]
+
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if chunk["choices"][0]["delta"].get("content")
+        ]
+        joined = "".join(contents)
+        self.assertIn("I will inspect this.", joined)
+        self.assertIn("Tool finished: streamed", joined)
+        self.assertNotIn("<tool_call>", joined)
+        self.assertEqual(len(seen_payloads), 2)
+        self.assertIn("$ printf streamed", seen_payloads[1]["query"])
+        self.assertNotIn("<tool_call>", seen_payloads[1]["query"])
+
     async def test_stream_response_emits_incremental_content(self):
         sse = b"".join([
             b'event: message\ndata: {"content":"abcdefghij"}\n\n',
@@ -309,6 +427,119 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen_payloads), 2)
         self.assertIn("$ printf executed", seen_payloads[1]["query"])
         self.assertIn("executed", seen_payloads[1]["query"])
+
+    async def test_non_stream_response_executes_multiple_xml_tool_calls(self):
+        first_sse = b"".join([
+            (
+                b'event: message\n'
+                b'data: {"content":"<tool_call>\\n<function=bash>\\n'
+                b'<parameter=command>printf first</parameter>\\n'
+                b'<parameter=description>Run first command</parameter>\\n'
+                b'</function>\\n</tool_call>'
+                b'<tool_call>\\n<function=bash>\\n'
+                b'<parameter=command>printf second</parameter>\\n'
+                b'<parameter=description>Run second command</parameter>\\n'
+                b'</function>\\n</tool_call>"}\n\n'
+            ),
+            b"event: finish\ndata: {}\n\n",
+        ])
+        second_sse = b"".join([
+            b'event: message\ndata: {"content":"Both tools finished"}\n\n',
+            b"event: finish\ndata: {}\n\n",
+        ])
+        seen_payloads = []
+
+        async def handler(request):
+            payload = json.loads(request.content)
+            seen_payloads.append(payload)
+            content = first_sse if len(seen_payloads) == 1 else second_sse
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content,
+            )
+
+        await self.client._client.aclose()
+        self.client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        result = await self.client.chat_completion(
+            [{"role": "user", "content": "Hi"}],
+            model="mimo-v2-flash",
+        )
+
+        self.assertEqual(
+            result["choices"][0]["message"]["content"],
+            "Both tools finished",
+        )
+        self.assertEqual(len(seen_payloads), 2)
+        self.assertIn("$ printf first", seen_payloads[1]["query"])
+        self.assertIn("$ printf second", seen_payloads[1]["query"])
+        self.assertNotIn("<tool_call>", seen_payloads[1]["query"])
+
+    async def test_execute_uppercase_bash_tool_call(self):
+        result = await self.client._execute_tool_call({
+            "id": "call_upper",
+            "function": {
+                "name": "Bash",
+                "arguments": json.dumps({"command": "printf upper"}),
+            },
+        })
+
+        self.assertIn("$ printf upper", result["content"])
+        self.assertIn("upper", result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_direct_shell_tool_without_arguments(self):
+        result = await self.client._execute_tool_call({
+            "id": "call_pwd",
+            "function": {
+                "name": "pwd",
+                "arguments": "{}",
+            },
+        })
+
+        self.assertIn("$ pwd", result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
+        self.assertNotIn("missing command", result["content"])
+
+    async def test_execute_read_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+
+            result = await self.client._execute_tool_call({
+                "id": "call_read",
+                "function": {
+                    "name": "read",
+                    "arguments": json.dumps({"path": str(path)}),
+                },
+            })
+
+        self.assertIn("$ read", result["content"])
+        self.assertIn("alpha", result["content"])
+        self.assertIn("beta", result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_glob_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "one.py").write_text("", encoding="utf-8")
+            (root / "two.txt").write_text("", encoding="utf-8")
+
+            result = await self.client._execute_tool_call({
+                "id": "call_glob",
+                "function": {
+                    "name": "glob",
+                    "arguments": json.dumps({"pattern": str(root / "*.py")}),
+                },
+            })
+
+        self.assertIn("$ glob", result["content"])
+        self.assertIn("one.py", result["content"])
+        self.assertNotIn("two.txt", result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
 
 
 class UsageNormalizationTests(unittest.TestCase):
@@ -394,6 +625,39 @@ class BuildPayloadTests(unittest.TestCase):
             [{"role": "user", "content": "hi"}], "mimo-v2.5-pro", {}
         )
         self.assertNotIn("stopSequences", payload)
+
+    def test_tool_instructions_are_added_when_tools_are_provided(self):
+        payload = self.client._build_payload(
+            [{"role": "user", "content": "commit and push"}],
+            "mimo-v2.5-pro",
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "description": "Run a shell command",
+                        },
+                    }
+                ],
+                "parallel_tool_calls": True,
+            },
+        )
+
+        self.assertIn("System tool-calling instructions:", payload["query"])
+        self.assertIn("<tool_call>", payload["query"])
+        self.assertIn("<function=bash>", payload["query"])
+        self.assertIn("git status --short", payload["query"])
+        self.assertIn("commit and push", payload["query"])
+
+    def test_tool_instructions_are_not_added_without_tools(self):
+        payload = self.client._build_payload(
+            [{"role": "user", "content": "hi"}],
+            "mimo-v2.5-pro",
+            {},
+        )
+
+        self.assertEqual(payload["query"], "hi")
 
     def test_multi_medias_empty_by_default(self):
         payload = self.client._build_payload(
