@@ -556,6 +556,28 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("beta", result["content"])
         self.assertNotIn("unsupported tool", result["content"])
 
+    async def test_execute_read_tool_accepts_file_path_parameter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.txt"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+
+            result = await self.client._execute_tool_call({
+                "id": "call_read_filepath",
+                "function": {
+                    "name": "read",
+                    "arguments": json.dumps({
+                        "filePath": str(path),
+                        "startLine": 2,
+                        "lineLimit": 1,
+                    }),
+                },
+            })
+
+        self.assertIn("$ read", result["content"])
+        self.assertIn("beta", result["content"])
+        self.assertNotIn("alpha", result["content"])
+        self.assertNotIn("missing filePath", result["content"])
+
     async def test_execute_glob_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -710,6 +732,25 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
             })
             self.assertIn(f"$ {name}", result["content"])
             self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_task_tool_uses_operation_object(self):
+        result = await self.client._execute_tool_call({
+            "id": "call_task",
+            "function": {
+                "name": "task",
+                "arguments": json.dumps({
+                    "operation": {
+                        "action": "create",
+                        "title": "Fix tool calls",
+                    }
+                }),
+            },
+        })
+
+        self.assertIn("$ task create", result["content"])
+        self.assertIn('"action": "create"', result["content"])
+        self.assertIn('"title": "Fix tool calls"', result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
 
 
 class UsageNormalizationTests(unittest.TestCase):

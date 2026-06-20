@@ -380,7 +380,7 @@ class MimoWebClient:
             "</function>\n"
             "</tool_call>\n\n"
             "For file reads and globbing, use parameters like:\n"
-            "<tool_call><function=read><parameter=path>app/main.py</parameter>"
+            "<tool_call><function=read><parameter=filePath>app/main.py</parameter>"
             "</function></tool_call>\n"
             "<tool_call><function=glob><parameter=pattern>**/*.py</parameter>"
             "</function></tool_call>\n\n"
@@ -393,6 +393,7 @@ class MimoWebClient:
             "Direct tags are also accepted for compatibility, for example:\n"
             "<webfetch>{\"url\":\"https://example.com\",\"format\":\"text\"}"
             "</webfetch>\n"
+            "<task>{\"operation\":{\"action\":\"list\"}}</task>\n"
             "<question>{\"questions\":[{\"question\":\"Pick one\"}]}"
             "</question>\n\n"
             "Do not wrap tool calls in Markdown fences. Do not explain the "
@@ -716,13 +717,34 @@ class MimoWebClient:
 
     @classmethod
     def _read_tool_content(cls, args: dict) -> str:
-        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        file_path = cls._tool_arg(
+            args,
+            "filePath",
+            "file_path",
+            "path",
+            "file",
+            "filename",
+        )
         if not file_path:
-            return "Tool execution failed: missing path parameter."
+            return "Tool execution failed: missing filePath parameter."
 
         path = Path(file_path).expanduser()
-        start_line = max(1, cls._tool_int_arg(args, 1, "start_line", "offset", "line"))
-        line_limit = max(1, cls._tool_int_arg(args, 2000, "limit", "lines", "line_limit"))
+        start_line = max(1, cls._tool_int_arg(
+            args,
+            1,
+            "startLine",
+            "start_line",
+            "offset",
+            "line",
+        ))
+        line_limit = max(1, cls._tool_int_arg(
+            args,
+            2000,
+            "lineLimit",
+            "limit",
+            "lines",
+            "line_limit",
+        ))
 
         lines = [f"$ read {shlex.quote(str(path))}"]
         try:
@@ -991,7 +1013,14 @@ class MimoWebClient:
 
     @classmethod
     def _write_tool_content(cls, args: dict) -> str:
-        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        file_path = cls._tool_arg(
+            args,
+            "filePath",
+            "file_path",
+            "path",
+            "file",
+            "filename",
+        )
         content = cls._tool_arg(args, "content", "text", "value", "input")
         if not file_path:
             return "Tool execution failed: missing path parameter."
@@ -1013,7 +1042,14 @@ class MimoWebClient:
 
     @classmethod
     def _edit_tool_content(cls, args: dict) -> str:
-        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        file_path = cls._tool_arg(
+            args,
+            "filePath",
+            "file_path",
+            "path",
+            "file",
+            "filename",
+        )
         old_text = cls._tool_arg(args, "old_string", "old", "search", "target")
         new_text = cls._tool_arg(args, "new_string", "new", "replace", "replacement")
         if not file_path:
@@ -1059,18 +1095,26 @@ class MimoWebClient:
     @classmethod
     def _task_tool_content(cls, args: dict) -> str:
         operation = args.get("operation")
-        if isinstance(operation, dict):
-            action = str(operation.get("action") or "list").lower()
-        else:
-            action = cls._tool_arg(args, "action", "operation") or "list"
-            action = action.lower()
+        if not isinstance(operation, dict):
+            operation = {
+                key: value
+                for key, value in args.items()
+                if key not in {"description"}
+            }
+        if not operation:
+            operation = {"action": "list"}
+        action = str(operation.get("action") or "list").lower()
 
         lines = [f"$ task {action}"]
+        lines.append(
+            "operation: "
+            + json.dumps(operation, ensure_ascii=False, sort_keys=True)
+        )
         if action == "list":
             lines.append("[]")
         else:
             lines.append(
-                "Task tool is recognized, but no local task backend is configured."
+                "Task operation accepted; no persistent task backend is configured."
             )
         return "\n".join(lines)
 
