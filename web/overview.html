@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiMo Overview</title>
+    <style>
+        :root {
+            --bg: #f6f7f9;
+            --panel: #ffffff;
+            --panel-soft: #eef2f6;
+            --border: #dfe4ea;
+            --text: #15191f;
+            --muted: #66727f;
+            --accent: #f26a21;
+            --blue: #2563eb;
+            --green: #15803d;
+            --red: #c9372c;
+            --radius: 8px;
+            --shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .shell {
+            max-width: 1180px;
+            margin: 0 auto;
+            padding: 22px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        h1 {
+            margin: 0 0 6px;
+            font-size: 28px;
+            line-height: 1.15;
+        }
+
+        .subtitle {
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .tabs {
+            display: inline-grid;
+            grid-template-columns: repeat(3, minmax(90px, 1fr));
+            gap: 3px;
+            padding: 3px;
+            background: #e4e8ed;
+            border-radius: var(--radius);
+            flex: 0 0 auto;
+        }
+
+        .tabs a {
+            color: #374151;
+            text-decoration: none;
+            text-align: center;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 650;
+        }
+
+        .tabs a.active {
+            background: var(--panel);
+            color: var(--text);
+            box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+        }
+
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 14px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        button, select {
+            height: 36px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--panel);
+            color: var(--text);
+            padding: 0 11px;
+            font: inherit;
+            font-size: 13px;
+            font-weight: 620;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        button:hover {
+            border-color: #b8c0ca;
+        }
+
+        .danger {
+            color: var(--red);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+
+        .metric {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+
+        .metric-label {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .02em;
+        }
+
+        .metric-value {
+            font-size: 26px;
+            font-weight: 780;
+            margin-top: 7px;
+            line-height: 1.1;
+            overflow-wrap: anywhere;
+        }
+
+        .metric.input .metric-value { color: var(--blue); }
+        .metric.output .metric-value { color: var(--green); }
+        .metric.cache .metric-value { color: var(--accent); }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+            gap: 14px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .panel-head {
+            padding: 13px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .panel-title {
+            font-size: 14px;
+            font-weight: 760;
+        }
+
+        .panel-meta {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th, td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        th:first-child,
+        td:first-child {
+            text-align: left;
+        }
+
+        th {
+            background: #f5f7fa;
+            color: #3e4854;
+            font-weight: 720;
+        }
+
+        tr.selectable {
+            cursor: pointer;
+        }
+
+        tr.selectable:hover td {
+            background: #fbfcfd;
+        }
+
+        tr.active td {
+            background: #fff4ed;
+        }
+
+        .empty {
+            color: var(--muted);
+            padding: 18px;
+            font-size: 13px;
+        }
+
+        .account-name {
+            font-weight: 700;
+        }
+
+        .recent-list {
+            display: grid;
+            gap: 8px;
+            padding: 12px;
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        .recent-item {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: #fbfcfd;
+            padding: 9px 10px;
+            display: grid;
+            gap: 5px;
+        }
+
+        .recent-top {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .recent-meta {
+            color: var(--muted);
+            font-size: 12px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 920px) {
+            header {
+                display: grid;
+            }
+
+            .tabs {
+                width: 100%;
+            }
+
+            .grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 560px) {
+            .shell {
+                padding: 14px;
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .toolbar {
+                display: grid;
+            }
+
+            .controls {
+                display: grid;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="shell">
+    <header>
+        <div>
+            <h1>Usage Overview</h1>
+            <div class="subtitle" id="updatedAt">Token usage theo account và model</div>
+        </div>
+        <nav class="tabs">
+            <a href="/">Config</a>
+            <a class="active" href="/overview">Overview</a>
+            <a href="/chat">Chatbot</a>
+        </nav>
+    </header>
+
+    <div class="toolbar">
+        <select id="accountFilter" onchange="selectAccount(this.value)"></select>
+        <div class="controls">
+            <button type="button" onclick="loadUsage()">Refresh</button>
+            <button class="danger" type="button" onclick="resetUsage()">Reset usage</button>
+        </div>
+    </div>
+
+    <section class="grid">
+        <div class="metric">
+            <div class="metric-label">Requests</div>
+            <div class="metric-value" id="requestsValue">0</div>
+        </div>
+        <div class="metric input">
+            <div class="metric-label">Input tokens</div>
+            <div class="metric-value" id="inputValue">0</div>
+        </div>
+        <div class="metric output">
+            <div class="metric-label">Output tokens</div>
+            <div class="metric-value" id="outputValue">0</div>
+        </div>
+        <div class="metric cache">
+            <div class="metric-label">Cache tokens</div>
+            <div class="metric-value" id="cacheValue">0</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Total tokens</div>
+            <div class="metric-value" id="totalValue">0</div>
+        </div>
+    </section>
+
+    <section class="layout">
+        <div class="panel">
+            <div class="panel-head">
+                <div class="panel-title">Accounts</div>
+                <div class="panel-meta" id="accountCount">0 account</div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Account</th>
+                        <th>Requests</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Cache</th>
+                        <th>Total</th>
+                        <th>Last used</th>
+                    </tr>
+                    </thead>
+                    <tbody id="accountRows"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-head">
+                <div class="panel-title" id="detailTitle">Account detail</div>
+                <div class="panel-meta" id="detailMeta">All accounts</div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Req</th>
+                        <th>Input</th>
+                        <th>Output</th>
+                        <th>Total</th>
+                    </tr>
+                    </thead>
+                    <tbody id="modelRows"></tbody>
+                </table>
+            </div>
+            <div class="recent-list" id="recentList"></div>
+        </div>
+    </section>
+</div>
+
+<script>
+let usageData = null;
+let selectedAccount = 'all';
+
+loadUsage();
+
+async function loadUsage() {
+    const res = await fetch('/api/usage');
+    usageData = await res.json();
+    renderUsage();
+}
+
+async function resetUsage() {
+    if (!confirm('Reset toàn bộ usage counters?')) return;
+    await fetch('/api/usage/reset', { method: 'POST' });
+    selectedAccount = 'all';
+    await loadUsage();
+}
+
+function renderUsage() {
+    const accounts = usageData.accounts || [];
+    const selected = selectedAccount === 'all'
+        ? null
+        : accounts.find(account => account.name === selectedAccount) || null;
+    const totals = selected ? selected.totals : usageData.totals || {};
+
+    document.getElementById('requestsValue').textContent = fmt(totals.requests);
+    document.getElementById('inputValue').textContent = fmt(totals.input_tokens);
+    document.getElementById('outputValue').textContent = fmt(totals.output_tokens);
+    document.getElementById('cacheValue').textContent = fmt(totals.cache_tokens);
+    document.getElementById('totalValue').textContent = fmt(totals.total_tokens);
+    document.getElementById('updatedAt').textContent = usageData.updated_at
+        ? `Updated ${formatDate(usageData.updated_at)}`
+        : 'Chưa có request nào được ghi nhận';
+
+    renderAccountFilter(accounts);
+    renderAccounts(accounts);
+    renderDetail(selected, accounts);
+}
+
+function renderAccountFilter(accounts) {
+    const filter = document.getElementById('accountFilter');
+    const current = selectedAccount;
+    filter.innerHTML = [
+        '<option value="all">All accounts</option>',
+        ...accounts.map(account => `<option value="${escAttr(account.name)}">${esc(account.name)}</option>`),
+    ].join('');
+    filter.value = accounts.some(account => account.name === current) ? current : 'all';
+    selectedAccount = filter.value;
+}
+
+function renderAccounts(accounts) {
+    document.getElementById('accountCount').textContent = `${accounts.length} account${accounts.length === 1 ? '' : 's'}`;
+    const rows = document.getElementById('accountRows');
+    if (!accounts.length) {
+        rows.innerHTML = '<tr><td colspan="7" class="empty">Chưa có usage. Gửi vài request từ Chatbot hoặc OpenAI endpoint để bắt đầu ghi nhận.</td></tr>';
+        return;
+    }
+
+    rows.innerHTML = accounts.map(account => {
+        const totals = account.totals || {};
+        return `
+            <tr class="selectable ${selectedAccount === account.name ? 'active' : ''}" onclick="selectAccount('${escAttr(account.name)}')">
+                <td><span class="account-name">${esc(account.name)}</span></td>
+                <td>${fmt(totals.requests)}</td>
+                <td>${fmt(totals.input_tokens)}</td>
+                <td>${fmt(totals.output_tokens)}</td>
+                <td>${fmt(totals.cache_tokens)}</td>
+                <td>${fmt(totals.total_tokens)}</td>
+                <td>${account.updated_at ? formatDate(account.updated_at) : '-'}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function renderDetail(selected, accounts) {
+    const models = selected
+        ? selected.models || []
+        : mergeModels(accounts);
+    const recent = selected
+        ? selected.recent || []
+        : usageData.recent || [];
+
+    document.getElementById('detailTitle').textContent = selected ? selected.name : 'All accounts';
+    document.getElementById('detailMeta').textContent = `${models.length} model${models.length === 1 ? '' : 's'}`;
+    document.getElementById('modelRows').innerHTML = models.length
+        ? models.map(item => {
+            const totals = item.totals || {};
+            return `
+                <tr>
+                    <td>${esc(item.model || 'unknown')}</td>
+                    <td>${fmt(totals.requests)}</td>
+                    <td>${fmt(totals.input_tokens)}</td>
+                    <td>${fmt(totals.output_tokens)}</td>
+                    <td>${fmt(totals.total_tokens)}</td>
+                </tr>
+            `;
+        }).join('')
+        : '<tr><td colspan="5" class="empty">No model usage yet.</td></tr>';
+
+    document.getElementById('recentList').innerHTML = recent.length
+        ? recent.slice(0, 20).map(item => `
+            <div class="recent-item">
+                <div class="recent-top">
+                    <span>${esc(item.model || 'unknown')}</span>
+                    <span>${fmt(item.total_tokens)} tokens</span>
+                </div>
+                <div class="recent-meta">
+                    <span>${esc(item.account || '')}</span>
+                    <span>${item.stream ? 'stream' : 'non-stream'}</span>
+                    <span>input ${fmt(item.input_tokens)}</span>
+                    <span>output ${fmt(item.output_tokens)}</span>
+                    <span>cache ${fmt(item.cache_tokens)}</span>
+                    <span>${formatDate(item.timestamp)}</span>
+                </div>
+            </div>
+        `).join('')
+        : '<div class="empty">No recent requests.</div>';
+}
+
+function mergeModels(accounts) {
+    const byModel = new Map();
+    for (const account of accounts) {
+        for (const item of account.models || []) {
+            const model = item.model || 'unknown';
+            const current = byModel.get(model) || {
+                model,
+                totals: { requests: 0, input_tokens: 0, output_tokens: 0, cache_tokens: 0, total_tokens: 0 },
+            };
+            for (const key of Object.keys(current.totals)) {
+                current.totals[key] += Number(item.totals?.[key] || 0);
+            }
+            byModel.set(model, current);
+        }
+    }
+    return Array.from(byModel.values()).sort((a, b) => b.totals.total_tokens - a.totals.total_tokens);
+}
+
+function selectAccount(name) {
+    selectedAccount = name;
+    renderUsage();
+}
+
+function fmt(value) {
+    return Number(value || 0).toLocaleString('en-US');
+}
+
+function formatDate(timestamp) {
+    if (!timestamp) return '-';
+    return new Date(timestamp * 1000).toLocaleString();
+}
+
+function esc(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function escAttr(value) {
+    return esc(value).replace(/"/g, '&quot;');
+}
+</script>
+</body>
+</html>

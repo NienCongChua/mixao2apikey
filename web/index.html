@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiMo Web2API - Management</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #f5f5f5; color: #333; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        h1 { color: #ff6900; margin-bottom: 10px; }
+        .subtitle { color: #666; margin-bottom: 30px; }
+        .card { background: white; border-radius: 12px; padding: 24px; margin-bottom: 20px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        h2 { font-size: 18px; margin-bottom: 16px; color: #333; }
+        .step { background: #fff7f0; border-left: 4px solid #ff6900; padding: 12px 16px;
+                margin-bottom: 16px; border-radius: 0 8px 8px 0; font-size: 14px; }
+        textarea, input { width: 100%; padding: 10px 12px; border: 1px solid #ddd;
+                          border-radius: 8px; font-size: 14px; font-family: monospace; margin-bottom: 12px; }
+        textarea { min-height: 100px; resize: vertical; }
+        label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 14px; }
+        .btn { background: #ff6900; color: white; border: none; padding: 10px 20px;
+               border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px; }
+        .btn:hover { background: #e55e00; }
+        .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
+        .btn-secondary { background: #95a5a6; }
+        .btn-secondary:hover { background: #7f8c8d; }
+        .account-item { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px;
+                        padding: 12px 16px; margin-bottom: 8px; display: flex;
+                        justify-content: space-between; align-items: center; }
+        .account-info { flex: 1; }
+        .account-name { font-weight: 600; }
+        .account-status { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+        .status-active { background: #e8f5e9; color: #2e7d32; }
+        .status-inactive { background: #fbe9e7; color: #c62828; }
+        .badge { display: inline-block; background: #e3f2fd; color: #1565c0; font-size: 11px;
+                 padding: 2px 6px; border-radius: 4px; margin-left: 8px; }
+        .flex { display: flex; gap: 8px; }
+        .mt-12 { margin-top: 12px; }
+        .info { background: #e3f2fd; color: #1565c0; padding: 12px; border-radius: 8px;
+                font-size: 13px; margin-bottom: 16px; }
+        .nav { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .nav a { text-decoration: none; color: #333; background: white; border: 1px solid #ddd;
+                 padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; }
+        .nav a.active { background: #ff6900; color: white; border-color: #ff6900; }
+        .key-item { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px;
+                    padding: 12px 16px; margin-bottom: 8px; display: flex;
+                    justify-content: space-between; gap: 12px; align-items: center; }
+        .key-meta { color: #888; font-size: 12px; margin-top: 4px; }
+        .generated-key { display: none; background: #ecfdf3; color: #166534; border: 1px solid #bbf7d0;
+                         padding: 10px 12px; border-radius: 8px; margin-top: 12px; overflow-wrap: anywhere; }
+        code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 MiMo Web2API</h1>
+        <p class="subtitle">Quản lý credentials để biến aistudio.xiaomimimo.com thành OpenAI-compatible API</p>
+
+        <nav class="nav">
+            <a class="active" href="/">Config</a>
+            <a href="/overview">Overview</a>
+            <a href="/chat">Chatbot</a>
+        </nav>
+
+        <div class="info">
+            <strong>Endpoint:</strong> <code>http://localhost:8080/v1/chat/completions</code><br>
+            <strong>Auth:</strong> Bỏ trống nếu chưa tạo key. Có thể set <code>MIMO_API_KEY</code> hoặc tạo API key optional bên dưới.<br>
+            <strong>Chat UI:</strong> <a href="/chat" style="color: #ff6900;">http://localhost:8080/chat</a> ·
+            <strong>Overview:</strong> <a href="/overview" style="color: #ff6900;">http://localhost:8080/overview</a>
+        </div>
+
+        <!-- Hướng dẫn -->
+        <div class="card">
+            <h2>📖 Cách lấy request đăng nhập</h2>
+            <div class="step">
+                1. Vào <a href="https://aistudio.xiaomimimo.com" target="_blank">aistudio.xiaomimimo.com</a> và đăng nhập
+            </div>
+            <div class="step">
+                2. Mở DevTools (F12) → Tab <strong>Network</strong>
+            </div>
+            <div class="step">
+                3. Gửi 1 tin nhắn bất kỳ, tìm request <strong>/open-apis/bot/chat</strong>
+            </div>
+            <div class="step">
+                4. Right-click → <strong>Copy as cURL</strong>
+            </div>
+            <div class="step">
+                5. Dán vào ô bên dưới và bấm <strong>Parse cURL</strong>
+            </div>
+        </div>
+
+        <!-- Parse cURL -->
+        <div class="card">
+            <h2>📋 Parse cURL</h2>
+            <textarea id="curlInput" placeholder="Dán cURL command từ DevTools vào đây..."></textarea>
+            <button class="btn" onclick="parseCurl()">Parse cURL</button>
+        </div>
+
+        <!-- Thêm Account -->
+        <div class="card">
+            <h2>➕ Thêm Account</h2>
+            <label>Tên hiển thị</label>
+            <input id="accName" placeholder="VD: Account 1, MiMo Free, ...">
+
+            <label>Cookie string</label>
+            <textarea id="accCookies" placeholder="Cookie string..."></textarea>
+
+            <label>User-Agent (tự động điền nếu parse cURL)</label>
+            <input id="accUA" placeholder="Mozilla/5.0...">
+
+            <label>MiMo request URL (tự động điền nếu parse cURL)</label>
+            <input id="accChatUrl" placeholder="https://aistudio.xiaomimimo.com/open-apis/bot/chat?..." readonly>
+
+            <button class="btn" onclick="addAccount()">Thêm Account</button>
+        </div>
+
+        <!-- Danh sách Accounts -->
+        <div class="card">
+            <h2>👤 Accounts đã cấu hình</h2>
+            <div id="accountList">
+                <p style="color: #999;">Chưa có account nào. Thêm account ở trên.</p>
+            </div>
+            <div class="flex mt-12">
+                <button class="btn btn-secondary" onclick="reloadAccounts()">🔄 Reload</button>
+                <button class="btn btn-danger" onclick="clearAccounts()">🗑 Xóa tất cả</button>
+            </div>
+        </div>
+
+        <!-- API Keys -->
+        <div class="card">
+            <h2>🔑 API keys sử dụng endpoint (optional)</h2>
+            <div class="info">
+                Khi có ít nhất một API key active, các endpoint <code>/v1/*</code> sẽ yêu cầu header
+                <code>Authorization: Bearer &lt;key&gt;</code>. Nếu không tạo key và không set <code>MIMO_API_KEY</code>,
+                server vẫn chạy không auth như trước.
+            </div>
+
+            <label>Tên key</label>
+            <input id="apiKeyName" placeholder="VD: Local testing, Team A, ...">
+
+            <label>Key tùy chọn</label>
+            <input id="apiKeyValue" placeholder="Bỏ trống để server tự generate">
+
+            <button class="btn" onclick="addAccessKey()">Tạo API key</button>
+            <div id="generatedKey" class="generated-key"></div>
+
+            <div class="mt-12" id="accessKeyList">
+                <p style="color: #999;">Chưa có API key nào.</p>
+            </div>
+        </div>
+
+        <!-- Endpoint Info -->
+        <div class="card">
+            <h2>🚀 Sử dụng</h2>
+            <p style="margin-bottom: 8px;">Ví dụ với Python OpenAI SDK:</p>
+            <pre style="background: #f0f0f0; padding: 12px; border-radius: 8px; overflow-x: auto;">
+<code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-your-key"  # Bỏ qua nếu chưa bật auth
+)
+
+response = client.chat.completions.create(
+    model="mimo-v2.5-pro",
+    messages=[{"role": "user", "content": "Hello!"}],
+    stream=True
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="")</code></pre>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        async function loadAccounts() {
+            try {
+                const res = await fetch(`${API_BASE}/api/config`);
+                const data = await res.json();
+                const list = document.getElementById('accountList');
+                
+                if (!data.credentials || data.credentials.length === 0) {
+                    list.innerHTML = '<p style="color: #999;">Chưa có account nào.</p>';
+                    return;
+                }
+
+                list.innerHTML = data.credentials.map((acc, idx) => `
+                    <div class="account-item">
+                        <div class="account-info">
+                            <span class="account-name">${acc.name || 'Unnamed'}</span>
+                            <span class="badge">${acc.is_active ? 'Active' : 'Inactive'}</span>
+                            <div style="font-size: 12px; color: #888; margin-top: 4px;">
+                                Cookie: ${acc.cookies ? acc.cookies.substring(0, 40) + '...' : 'N/A'}
+                            </div>
+                        </div>
+                        <div class="flex">
+                            <button class="btn btn-secondary" style="padding: 4px 12px; font-size: 12px;" onclick="testAccount(${idx})">Test</button>
+                            <button class="btn btn-danger" style="padding: 4px 12px; font-size: 12px;" onclick="deleteAccount(${idx})">Xóa</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                document.getElementById('accountList').innerHTML = 
+                    '<p style="color: #e74c3c;">Lỗi tải danh sách. Server đang chạy?</p>';
+            }
+        }
+
+        async function loadAccessKeys() {
+            const res = await fetch(`${API_BASE}/api/access-keys`);
+            const data = await res.json();
+            const list = document.getElementById('accessKeyList');
+            const keys = data.api_keys || [];
+
+            if (!keys.length) {
+                list.innerHTML = '<p style="color: #999;">Chưa có API key nào.</p>';
+                return;
+            }
+
+            list.innerHTML = keys.map(key => `
+                <div class="key-item">
+                    <div>
+                        <div class="account-name">${esc(key.name || 'API key')}</div>
+                        <div class="key-meta">
+                            ${esc(key.key_preview || '')} · ${key.is_active ? 'Active' : 'Inactive'}
+                            ${key.last_used_at ? ' · Last used: ' + new Date(key.last_used_at * 1000).toLocaleString() : ''}
+                        </div>
+                    </div>
+                    <div class="flex">
+                        <button class="btn btn-secondary" style="padding: 4px 12px; font-size: 12px;" onclick="toggleAccessKey('${key.id}', ${!key.is_active})">
+                            ${key.is_active ? 'Disable' : 'Enable'}
+                        </button>
+                        <button class="btn btn-danger" style="padding: 4px 12px; font-size: 12px;" onclick="deleteAccessKey('${key.id}')">Xóa</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function addAccessKey() {
+            const name = document.getElementById('apiKeyName').value.trim() || 'API key ' + Date.now();
+            const key = document.getElementById('apiKeyValue').value.trim();
+            const res = await fetch(`${API_BASE}/api/access-keys`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, key})
+            });
+            const data = await res.json();
+            const created = data.api_key;
+            document.getElementById('apiKeyName').value = '';
+            document.getElementById('apiKeyValue').value = '';
+            const box = document.getElementById('generatedKey');
+            box.style.display = 'block';
+            box.innerHTML = `<strong>Key mới:</strong> <code>${esc(created.key)}</code>`;
+            loadAccessKeys();
+        }
+
+        async function deleteAccessKey(id) {
+            if (!confirm('Xóa API key này?')) return;
+            await fetch(`${API_BASE}/api/access-keys/${id}`, { method: 'DELETE' });
+            loadAccessKeys();
+        }
+
+        async function toggleAccessKey(id, isActive) {
+            await fetch(`${API_BASE}/api/access-keys/${id}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({is_active: isActive})
+            });
+            loadAccessKeys();
+        }
+
+        async function parseCurl() {
+            const curl = document.getElementById('curlInput').value;
+            if (!curl) return alert('Vui lòng dán cURL command!');
+
+            const res = await fetch(`${API_BASE}/api/parse-curl`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({curl})
+            });
+            const data = await res.json();
+            
+            document.getElementById('accCookies').value = data.cookies || '';
+            document.getElementById('accUA').value = data.user_agent || '';
+            document.getElementById('accChatUrl').value = data.url || '';
+
+            const hasCookieValue = (data.cookies || '').split(';').some(part => {
+                const value = part.includes('=') ? part.split('=').slice(1).join('=').trim() : '';
+                return value.length > 0;
+            });
+            if (hasCookieValue) {
+                const endpoint = data.url ? `\nEndpoint: ${data.url}` : '';
+                alert(`✅ Đã parse thành công! Cookie và User-Agent đã được điền.${endpoint}`);
+            } else {
+                alert('⚠️ Cookie không có giá trị. Hãy đăng nhập lại, gửi một tin nhắn rồi Copy as cURL request /open-apis/bot/chat.');
+            }
+        }
+
+        async function addAccount() {
+            const name = document.getElementById('accName').value.trim() || 'Account ' + Date.now();
+            const cookies = document.getElementById('accCookies').value.trim();
+            const ua = document.getElementById('accUA').value.trim();
+            const chatUrl = document.getElementById('accChatUrl').value.trim();
+
+            if (!cookies) return alert('Vui lòng nhập cookie!');
+            const hasCookieValue = cookies.split(';').some(part => {
+                const value = part.includes('=') ? part.split('=').slice(1).join('=').trim() : '';
+                return value.length > 0;
+            });
+            if (!hasCookieValue) return alert('Cookie đang rỗng. Hãy đăng nhập lại và dán cURL mới.');
+
+            const res = await fetch(`${API_BASE}/api/config`);
+            const data = await res.json();
+            const creds = data.credentials || [];
+
+            creds.push({
+                name,
+                cookies,
+                user_agent: ua,
+                chat_url: chatUrl,
+                is_active: true
+            });
+
+            await fetch(`${API_BASE}/api/config`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({credentials: creds})
+            });
+
+            document.getElementById('accName').value = '';
+            document.getElementById('accCookies').value = '';
+            document.getElementById('accUA').value = '';
+            document.getElementById('accChatUrl').value = '';
+            alert('✅ Đã thêm account!');
+            loadAccounts();
+        }
+
+        async function deleteAccount(idx) {
+            const res = await fetch(`${API_BASE}/api/config`);
+            const data = await res.json();
+            data.credentials.splice(idx, 1);
+
+            await fetch(`${API_BASE}/api/config`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({credentials: data.credentials})
+            });
+            loadAccounts();
+        }
+
+        async function testAccount(idx) {
+            const res = await fetch(`${API_BASE}/api/config`);
+            const data = await res.json();
+            const acc = data.credentials[idx];
+
+            const testRes = await fetch(`${API_BASE}/api/test-account`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(acc)
+            });
+            const result = await testRes.json();
+            alert(result.status === 'healthy' ? '✅ Account hoạt động tốt!' : `❌ Lỗi: ${result.message || 'Account không hoạt động'}`);
+        }
+
+        async function reloadAccounts() {
+            await fetch(`${API_BASE}/api/reload`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'}
+            });
+            loadAccounts();
+        }
+
+        async function clearAccounts() {
+            if (!confirm('Xóa tất cả accounts?')) return;
+            await fetch(`${API_BASE}/api/config`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({credentials: []})
+            });
+            loadAccounts();
+        }
+
+        loadAccounts();
+        loadAccessKeys();
+
+        function esc(value) {
+            const div = document.createElement('div');
+            div.textContent = value == null ? '' : String(value);
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
