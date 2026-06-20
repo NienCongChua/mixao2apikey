@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from typing import AsyncGenerator, AsyncIterator, Optional
@@ -8,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from app.config import load_credentials
+from app.config import load_credentials, save_credentials
 from app.usage import usage_tracker
 from app.utils import (
     build_non_stream_response,
@@ -84,6 +85,8 @@ class MimoWebClient:
     WEB_CHAT_URL = "https://aistudio.xiaomimimo.com/open-apis/bot/chat"
     def __init__(self, credentials: dict):
         self.name = credentials.get("name", "default")
+        self.cookie_string = credentials.get("cookies", "")
+        self.credential_index: Optional[int] = None
         self.cookies = parse_cookies_from_string(credentials.get("cookies", ""))
         self.chat_params = self._build_chat_params(credentials)
         self.user_agent = credentials.get(
@@ -510,6 +513,31 @@ class MimoWebClient:
             usage = None
             content_parts = []
             reasoning_parts = []
+            content_buffer = ""
+            content_emitted = False
+            tool_prefixes = ("<tool_call", "<toolcall")
+
+            def visible_content_chunks(part: str) -> list[str]:
+                nonlocal content_buffer, content_emitted
+                if content_emitted:
+                    return [part] if part else []
+
+                content_buffer += part
+                stripped = content_buffer.lstrip()
+                if not stripped:
+                    return []
+
+                looks_like_tool_prefix = any(
+                    prefix.startswith(stripped) or stripped.startswith(prefix)
+                    for prefix in tool_prefixes
+                )
+                if looks_like_tool_prefix:
+                    return []
+
+                content_emitted = True
+                output = content_buffer
+                content_buffer = ""
+                return [output] if output else []
 
             async with self._client.stream(
                 "POST",
@@ -527,6 +555,11 @@ class MimoWebClient:
                         ):
                             target = reasoning_parts if is_reasoning else content_parts
                             target.append(part)
+                            if is_reasoning:
+                                yield parse_stream_chunk({"reasoning": part}, model)
+                            else:
+                                for chunk in visible_content_chunks(part):
+                                    yield parse_stream_chunk({"content": chunk}, model)
                     elif event == "usage":
                         usage = self._normalize_usage(data)
                     elif event in ("error", "sensitive_query"):
@@ -537,14 +570,18 @@ class MimoWebClient:
             for part, is_reasoning in parser.feed("", final=True):
                 target = reasoning_parts if is_reasoning else content_parts
                 target.append(part)
+                if is_reasoning:
+                    yield parse_stream_chunk({"reasoning": part}, model)
+                else:
+                    for chunk in visible_content_chunks(part):
+                        yield parse_stream_chunk({"content": chunk}, model)
 
-            reasoning = "".join(reasoning_parts)
             content = "".join(content_parts)
             tool_calls = parse_xml_tool_call(content)
 
             await asyncio.to_thread(usage_tracker.record, self.name, model, usage, True)
 
-            if tool_calls and tool_round < MAX_AUTO_TOOL_ROUNDS:
+            if tool_calls and not content_emitted and tool_round < MAX_AUTO_TOOL_ROUNDS:
                 tool_results = await self._execute_tool_calls(tool_calls)
                 followup_messages = [
                     *messages,
@@ -569,10 +606,7 @@ class MimoWebClient:
                     yield chunk
                 return
 
-            if reasoning:
-                yield parse_stream_chunk({"reasoning": reasoning}, model)
-
-            if tool_calls:
+            if tool_calls and not content_emitted:
                 stream_tool_calls = []
                 for index, tool_call in enumerate(tool_calls):
                     stream_tool_calls.append({"index": index, **tool_call})
@@ -591,8 +625,8 @@ class MimoWebClient:
                     }],
                 }
                 finish_reason = "tool_calls"
-            elif content:
-                yield parse_stream_chunk({"content": content}, model)
+            elif not content_emitted and content_buffer:
+                yield parse_stream_chunk({"content": content_buffer}, model)
                 finish_reason = "stop"
             else:
                 finish_reason = "stop"
@@ -640,21 +674,30 @@ class MimoClientManager:
     def __init__(self):
         self.clients: list[MimoWebClient] = []
         self._current_index = 0
+        self._lock = threading.RLock()
         self._load_credentials()
 
     def _load_credentials(self):
         creds_list = load_credentials()
-        self.clients = []
-        for cred in creds_list:
+        clients = []
+        for index, cred in enumerate(creds_list):
             if cred.get("is_active", True) and cred.get("cookies"):
                 try:
-                    self.clients.append(MimoWebClient(cred))
+                    client = MimoWebClient(cred)
+                    client.credential_index = index
+                    clients.append(client)
                 except Exception as exc:
                     logger.warning(
                         "Failed to load credential '%s': %s",
                         cred.get("name"),
                         exc,
                     )
+        with self._lock:
+            self.clients = clients
+            if self.clients:
+                self._current_index %= len(self.clients)
+            else:
+                self._current_index = 0
         logger.info("Loaded %s MiMo web clients", len(self.clients))
 
     def reload(self):
@@ -666,15 +709,123 @@ class MimoClientManager:
         self._load_credentials()
 
     def get_client(self) -> Optional[MimoWebClient]:
-        if not self.clients:
-            return None
-        client = self.clients[self._current_index % len(self.clients)]
-        self._current_index += 1
-        return client
+        with self._lock:
+            if not self.clients:
+                return None
+            client = self.clients[self._current_index % len(self.clients)]
+            self._current_index += 1
+            return client
+
+    def get_client_attempts(self) -> list[MimoWebClient]:
+        first = self.get_client()
+        if first is None:
+            return []
+
+        with self._lock:
+            clients = list(self.clients)
+
+        first_index = next(
+            (index for index, client in enumerate(clients) if client is first),
+            None,
+        )
+        if first_index is None:
+            return [first]
+
+        return [
+            clients[(first_index + offset) % len(clients)]
+            for offset in range(len(clients))
+        ]
+
+    @staticmethod
+    def is_account_error(exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if status in (401, 403, 419, 440):
+                return True
+            text = exc.response.text
+        else:
+            status = None
+            text = str(exc)
+
+        lowered = (text or "").lower()
+        if "sensitive_query" in lowered:
+            return False
+
+        keywords = (
+            "session",
+            "cookie",
+            "access token",
+            "service token",
+            "servicetoken",
+            "unauthorized",
+            "forbidden",
+            "login",
+            "expired",
+            "expire",
+            "hết hạn",
+            "het han",
+            "đăng nhập",
+            "dang nhap",
+            "未登录",
+            "登录",
+            "登陆",
+            "过期",
+        )
+        return any(keyword in lowered for keyword in keywords) and (
+            status is None or status < 500
+        )
+
+    @staticmethod
+    def describe_error(exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            body = exc.response.text.strip()
+            if body:
+                return f"HTTP {exc.response.status_code}: {body[:300]}"
+            return f"HTTP {exc.response.status_code}"
+        return str(exc)[:300]
+
+    async def mark_client_failed(self, client: MimoWebClient, reason: str) -> None:
+        await asyncio.to_thread(self._mark_client_failed_sync, client, reason)
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+    def _mark_client_failed_sync(self, client: MimoWebClient, reason: str) -> None:
+        with self._lock:
+            creds_list = load_credentials()
+            target_index = getattr(client, "credential_index", None)
+
+            if not (
+                isinstance(target_index, int)
+                and 0 <= target_index < len(creds_list)
+            ):
+                target_index = next(
+                    (
+                        index
+                        for index, credential in enumerate(creds_list)
+                        if credential.get("name", "default") == getattr(client, "name", None)
+                        and credential.get("cookies", "") == getattr(client, "cookie_string", None)
+                    ),
+                    None,
+                )
+
+            if target_index is not None:
+                creds_list[target_index]["is_active"] = False
+                creds_list[target_index]["last_error"] = reason
+                creds_list[target_index]["last_error_at"] = int(time.time())
+                save_credentials(creds_list)
+
+            self.clients = [item for item in self.clients if item is not client]
+            if self.clients:
+                self._current_index %= len(self.clients)
+            else:
+                self._current_index = 0
 
     @property
     def count(self) -> int:
-        return len(self.clients)
+        with self._lock:
+            return len(self.clients)
 
 
 client_manager = MimoClientManager()

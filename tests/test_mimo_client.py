@@ -231,6 +231,40 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
             True,
         )
 
+    async def test_stream_response_emits_incremental_content(self):
+        sse = b"".join([
+            b'event: message\ndata: {"content":"abcdefghij"}\n\n',
+            b'event: message\ndata: {"content":"klmnopqrst"}\n\n',
+            b"event: finish\ndata: {}\n\n",
+        ])
+
+        async def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse,
+            )
+
+        await self.client._client.aclose()
+        self.client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+
+        stream = await self.client.chat_completion(
+            [{"role": "user", "content": "Hi"}],
+            model="mimo-v2-flash",
+            stream=True,
+        )
+        chunks = [chunk async for chunk in stream]
+
+        contents = [
+            chunk["choices"][0]["delta"].get("content", "")
+            for chunk in chunks
+            if chunk["choices"][0]["delta"].get("content")
+        ]
+        self.assertGreater(len(contents), 1)
+        self.assertEqual("".join(contents), "abcdefghijklmnopqrst")
+
     async def test_non_stream_response_executes_xml_tool_call(self):
         first_sse = b"".join([
             (

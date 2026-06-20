@@ -3,3 +3,4 @@ api_keys.json
 usage_stats.json
 venv
 .pytest_cache
+app.log

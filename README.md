@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="public/picture1.png" alt="MiMo Web2API" width="600">
   <h1>MiMo Web2API</h1>
   <p>
     <strong>OpenAI-compatible API gateway for Xiaomi MiMo Studio web sessions.</strong>
@@ -13,6 +14,7 @@
     <a href="#tool-calling">Tool Calling</a>
     ·
     <a href="#license">License</a>
+  </p>
   </p>
   <p>
     <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white">

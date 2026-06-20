@@ -250,6 +250,46 @@ async def test_chat_completions_upstream_error(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_disables_bad_account_and_retries(client):
+    bad_client = MagicMock()
+    bad_client.name = "expired"
+    bad_client.chat_completion = AsyncMock(side_effect=RuntimeError("session expired"))
+
+    good_result = {
+        "id": "chatcmpl-test123",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "mimo-v2.5-pro",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Recovered"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    good_client = MagicMock()
+    good_client.name = "healthy"
+    good_client.chat_completion = AsyncMock(return_value=good_result)
+
+    with patch.object(client_manager, "get_client_attempts", return_value=[bad_client, good_client]), \
+         patch.object(client_manager, "mark_client_failed", new=AsyncMock()) as mark_failed:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mimo-v2.5-pro",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["choices"][0]["message"]["content"] == "Recovered"
+    mark_failed.assert_awaited_once_with(bad_client, "session expired")
+    good_client.chat_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_stream(client):
     async def fake_stream(*args, **kwargs):
         yield {"choices": [{"delta": {"role": "assistant", "content": "Hi"}}]}
@@ -273,6 +313,37 @@ async def test_chat_completions_stream(client):
     data_lines = [l for l in lines if l.startswith("data: ")]
     assert len(data_lines) >= 3
     assert data_lines[-1] == "data: [DONE]"
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_stream_retries_before_first_chunk(client):
+    async def fake_stream(*args, **kwargs):
+        yield {"choices": [{"delta": {"role": "assistant", "content": "OK"}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+    bad_client = MagicMock()
+    bad_client.name = "expired"
+    bad_client.chat_completion = AsyncMock(side_effect=RuntimeError("cookie expired"))
+
+    good_client = MagicMock()
+    good_client.name = "healthy"
+    good_client.chat_completion = AsyncMock(return_value=fake_stream())
+
+    with patch.object(client_manager, "get_client_attempts", return_value=[bad_client, good_client]), \
+         patch.object(client_manager, "mark_client_failed", new=AsyncMock()) as mark_failed:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mimo-v2.5-pro",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    assert '"content": "OK"' in resp.text
+    assert "data: [DONE]" in resp.text
+    mark_failed.assert_awaited_once_with(bad_client, "cookie expired")
 
 
 # ─── POST /api/config ───

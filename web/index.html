@@ -189,21 +189,27 @@ for chunk in response:
                     return;
                 }
 
-                list.innerHTML = data.credentials.map((acc, idx) => `
+                list.innerHTML = data.credentials.map((acc, idx) => {
+                    const lastError = acc.last_error
+                        ? `<div style="font-size: 12px; color: #c62828; margin-top: 4px;">Last error: ${esc(acc.last_error)}</div>`
+                        : '';
+                    return `
                     <div class="account-item">
                         <div class="account-info">
-                            <span class="account-name">${acc.name || 'Unnamed'}</span>
+                            <span class="account-name">${esc(acc.name || 'Unnamed')}</span>
                             <span class="badge">${acc.is_active ? 'Active' : 'Inactive'}</span>
                             <div style="font-size: 12px; color: #888; margin-top: 4px;">
-                                Cookie: ${acc.cookies ? acc.cookies.substring(0, 40) + '...' : 'N/A'}
+                                Cookie: ${acc.cookies ? esc(acc.cookies.substring(0, 40)) + '...' : 'N/A'}
                             </div>
+                            ${lastError}
                         </div>
                         <div class="flex">
                             <button class="btn btn-secondary" style="padding: 4px 12px; font-size: 12px;" onclick="testAccount(${idx})">Test</button>
                             <button class="btn btn-danger" style="padding: 4px 12px; font-size: 12px;" onclick="deleteAccount(${idx})">Xóa</button>
                         </div>
                     </div>
-                `).join('');
+                    `;
+                }).join('');
             } catch (e) {
                 document.getElementById('accountList').innerHTML = 
                     '<p style="color: #e74c3c;">Lỗi tải danh sách. Server đang chạy?</p>';

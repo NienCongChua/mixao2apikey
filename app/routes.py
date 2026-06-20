@@ -60,8 +60,8 @@ async def chat_completions(
     """
     POST /v1/chat/completions - OpenAI-compatible chat endpoint
     """
-    client = client_manager.get_client()
-    if not client:
+    clients = client_manager.get_client_attempts()
+    if not clients:
         raise HTTPException(
             status_code=503,
             detail="No active MiMo accounts. Please add credentials via web UI."
@@ -96,7 +96,7 @@ async def chat_completions(
 
     if request.stream:
         return StreamingResponse(
-            _stream_response(client, messages, model, kwargs),
+            _stream_response(clients, messages, model, kwargs),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -105,38 +105,84 @@ async def chat_completions(
             }
         )
 
-    try:
-        result = await client.chat_completion(
-            messages=messages,
-            model=model,
-            stream=False,
-            **kwargs,
-        )
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(f"Chat completion error: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
+    last_account_error = None
+    for client in clients:
+        try:
+            result = await client.chat_completion(
+                messages=messages,
+                model=model,
+                stream=False,
+                **kwargs,
+            )
+            return JSONResponse(content=result)
+        except Exception as exc:
+            if client_manager.is_account_error(exc):
+                last_account_error = exc
+                reason = client_manager.describe_error(exc)
+                logger.warning(
+                    "Disabling MiMo account '%s' after auth/session error: %s",
+                    getattr(client, "name", "unknown"),
+                    reason,
+                )
+                await client_manager.mark_client_failed(client, reason)
+                continue
+
+            logger.error("Chat completion error: %s", exc)
+            raise HTTPException(status_code=502, detail=str(exc))
+
+    detail = "All active MiMo accounts failed"
+    if last_account_error:
+        detail += f": {client_manager.describe_error(last_account_error)}"
+    raise HTTPException(status_code=503, detail=detail)
 
 
-async def _stream_response(client, messages, model, kwargs) -> AsyncGenerator[str, None]:
+async def _stream_response(clients, messages, model, kwargs) -> AsyncGenerator[str, None]:
     """Stream response ở định dạng SSE"""
-    try:
-        stream = await client.chat_completion(
-            messages=messages,
-            model=model,
-            stream=True,
-            **kwargs,
-        )
-        async for chunk in stream:
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
-    except Exception as e:
-        logger.error(f"Stream error: {e}")
-        error_chunk = {
-            "error": {"message": str(e), "type": "server_error"}
-        }
-        yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+    last_account_error = None
+
+    for client in clients:
+        emitted = False
+        try:
+            stream = await client.chat_completion(
+                messages=messages,
+                model=model,
+                stream=True,
+                **kwargs,
+            )
+            async for chunk in stream:
+                emitted = True
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        except Exception as exc:
+            if client_manager.is_account_error(exc):
+                last_account_error = exc
+                reason = client_manager.describe_error(exc)
+                logger.warning(
+                    "Disabling MiMo account '%s' after stream auth/session error: %s",
+                    getattr(client, "name", "unknown"),
+                    reason,
+                )
+                await client_manager.mark_client_failed(client, reason)
+                if not emitted:
+                    continue
+
+            logger.error("Stream error: %s", exc)
+            error_chunk = {
+                "error": {"message": str(exc), "type": "server_error"}
+            }
+            yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+    message = "All active MiMo accounts failed"
+    if last_account_error:
+        message += f": {client_manager.describe_error(last_account_error)}"
+    error_chunk = {
+        "error": {"message": message, "type": "server_error"}
+    }
+    yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 # ─── Web UI ───
