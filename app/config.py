@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     credentials_file: str = "credentials.json"
     api_keys_file: str = "api_keys.json"
     usage_file: str = "usage_stats.json"
+    memory_file: str = "memory.json"
     proxy_url: Optional[str] = None  # Proxy cho requests ra ngoài
 
     class Config:
@@ -24,6 +25,7 @@ settings = Settings()
 CREDENTIALS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.credentials_file)
 API_KEYS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.api_keys_file)
 USAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.usage_file)
+MEMORY_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.memory_file)
 
 
 def load_credentials() -> list[dict]:

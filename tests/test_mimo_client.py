@@ -168,6 +168,28 @@ class ToolCallParserTests(unittest.TestCase):
             {},
         )
 
+    def test_parses_direct_tool_tags(self):
+        tool_calls = parse_xml_tool_call(
+            'Tool:\n'
+            '<webfetch>{"url": "https://httpbin.org/get", "format": "json"}</webfetch>\n'
+            '<task>{"operation": {"action": "list"}}</task>\n'
+            '<question>{"questions": [{"question": "Pick?", "options": [{"label": "A"}]}]}</question>'
+        )
+
+        self.assertIsNotNone(tool_calls)
+        self.assertEqual(
+            [tool_call["function"]["name"] for tool_call in tool_calls],
+            ["webfetch", "task", "question"],
+        )
+        self.assertEqual(
+            json.loads(tool_calls[0]["function"]["arguments"]),
+            {"url": "https://httpbin.org/get", "format": "json"},
+        )
+        self.assertEqual(
+            json.loads(tool_calls[1]["function"]["arguments"]),
+            {"operation": {"action": "list"}},
+        )
+
     def test_ignores_regular_content(self):
         self.assertIsNone(parse_xml_tool_call("Hello"))
 
@@ -185,6 +207,18 @@ class ToolCallParserTests(unittest.TestCase):
         self.assertNotIn("<tool_call>", strip_xml_tool_calls(content))
         self.assertIn("I will inspect this.", strip_xml_tool_calls(content))
         self.assertIn("Then I will summarize.", strip_xml_tool_calls(content))
+
+    def test_strips_direct_tool_tags_from_visible_content(self):
+        content = (
+            "Fetch this.\n"
+            '<webfetch>{"url": "https://example.com"}</webfetch>\n'
+            "Done."
+        )
+
+        stripped = strip_xml_tool_calls(content)
+        self.assertNotIn("<webfetch>", stripped)
+        self.assertIn("Fetch this.", stripped)
+        self.assertIn("Done.", stripped)
 
 
 class ReasoningParserTests(unittest.TestCase):
@@ -540,6 +574,142 @@ class MimoClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("one.py", result["content"])
         self.assertNotIn("two.txt", result["content"])
         self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_grep_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "one.py").write_text("alpha\nneedle\n", encoding="utf-8")
+            (root / "two.py").write_text("nothing\n", encoding="utf-8")
+
+            result = await self.client._execute_tool_call({
+                "id": "call_grep",
+                "function": {
+                    "name": "grep",
+                    "arguments": json.dumps({
+                        "pattern": "needle",
+                        "path": str(root),
+                    }),
+                },
+            })
+
+        self.assertIn("$ grep needle", result["content"])
+        self.assertIn("one.py", result["content"])
+        self.assertIn("needle", result["content"])
+        self.assertNotIn("two.py", result["content"])
+        self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_memory_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_path = str(Path(temp_dir) / "memory.json")
+            with patch("app.mimo_client.MEMORY_PATH", memory_path):
+                save_result = await self.client._execute_tool_call({
+                    "id": "call_memory_save",
+                    "function": {
+                        "name": "memory",
+                        "arguments": json.dumps({
+                            "action": "remember",
+                            "key": "project",
+                            "content": "tool calling is enabled",
+                        }),
+                    },
+                })
+                recall_result = await self.client._execute_tool_call({
+                    "id": "call_memory_recall",
+                    "function": {
+                        "name": "memory",
+                        "arguments": json.dumps({
+                            "action": "recall",
+                            "query": "tool calling",
+                        }),
+                    },
+                })
+
+        self.assertIn("Saved memory project", save_result["content"])
+        self.assertIn("project: tool calling is enabled", recall_result["content"])
+        self.assertNotIn("unsupported tool", recall_result["content"])
+
+    async def test_execute_webfetch_tool(self):
+        class FakeResponse:
+            status_code = 200
+            headers = {"content-type": "application/json"}
+            text = '{"ok": true}'
+
+            def json(self):
+                return {"ok": True}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def request(self, method, url, **kwargs):
+                self.method = method
+                self.url = url
+                return FakeResponse()
+
+        with patch("app.mimo_client.httpx.AsyncClient", FakeAsyncClient):
+            result = await self.client._execute_tool_call({
+                "id": "call_webfetch",
+                "function": {
+                    "name": "webfetch",
+                    "arguments": json.dumps({
+                        "url": "https://example.com/api",
+                        "format": "json",
+                    }),
+                },
+            })
+
+        self.assertIn("$ webfetch https://example.com/api", result["content"])
+        self.assertIn("HTTP 200", result["content"])
+        self.assertIn('"ok": true', result["content"].lower())
+        self.assertNotIn("unsupported tool", result["content"])
+
+    async def test_execute_write_and_edit_tools(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "note.txt"
+            write_result = await self.client._execute_tool_call({
+                "id": "call_write",
+                "function": {
+                    "name": "write",
+                    "arguments": json.dumps({
+                        "path": str(path),
+                        "content": "alpha beta",
+                    }),
+                },
+            })
+            edit_result = await self.client._execute_tool_call({
+                "id": "call_edit",
+                "function": {
+                    "name": "edit",
+                    "arguments": json.dumps({
+                        "path": str(path),
+                        "old_string": "beta",
+                        "new_string": "gamma",
+                    }),
+                },
+            })
+            final_content = path.read_text(encoding="utf-8")
+
+        self.assertIn("wrote", write_result["content"])
+        self.assertIn("replaced 1 occurrence", edit_result["content"])
+        self.assertEqual(final_content, "alpha gamma")
+
+    async def test_execute_capability_stub_tools(self):
+        for name in ("task", "question", "actor", "workflow", "skill", "history"):
+            result = await self.client._execute_tool_call({
+                "id": f"call_{name}",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps({"action": "list"}),
+                },
+            })
+            self.assertIn(f"$ {name}", result["content"])
+            self.assertNotIn("unsupported tool", result["content"])
 
 
 class UsageNormalizationTests(unittest.TestCase):

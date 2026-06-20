@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from app.config import load_credentials, save_credentials
+from app.config import MEMORY_PATH, load_credentials, save_credentials
 from app.usage import usage_tracker
 from app.utils import (
     build_non_stream_response,
@@ -45,6 +45,43 @@ DIRECT_SHELL_TOOLS = {"whoami", "date", "pwd", "ls", "uname", "git"}
 TIME_TOOL_NAMES = {"time", "get_time", "get_current_time", "current_time"}
 READ_TOOL_NAMES = {"read", "read_file", "file_read", "cat"}
 GLOB_TOOL_NAMES = {"glob", "glob_files", "find_files"}
+GREP_TOOL_NAMES = {"grep", "search", "search_files"}
+MEMORY_TOOL_NAMES = {"memory", "remember", "recall"}
+WEBFETCH_TOOL_NAMES = {"webfetch", "web_fetch"}
+WRITE_TOOL_NAMES = {"write", "write_file"}
+EDIT_TOOL_NAMES = {"edit", "edit_file"}
+HISTORY_TOOL_NAMES = {"history"}
+QUESTION_TOOL_NAMES = {"question"}
+TASK_TOOL_NAMES = {"task"}
+CAPABILITY_STUB_TOOL_NAMES = {"actor", "workflow", "skill"}
+DIRECT_TAG_TOOL_NAMES = sorted(
+    SHELL_TOOL_NAMES
+    | DIRECT_SHELL_TOOLS
+    | TIME_TOOL_NAMES
+    | READ_TOOL_NAMES
+    | GLOB_TOOL_NAMES
+    | GREP_TOOL_NAMES
+    | MEMORY_TOOL_NAMES
+    | WEBFETCH_TOOL_NAMES
+    | WRITE_TOOL_NAMES
+    | EDIT_TOOL_NAMES
+    | HISTORY_TOOL_NAMES
+    | QUESTION_TOOL_NAMES
+    | TASK_TOOL_NAMES
+    | CAPABILITY_STUB_TOOL_NAMES
+)
+DIRECT_TAG_TOOL_PATTERN = "|".join(re.escape(name) for name in DIRECT_TAG_TOOL_NAMES)
+SEARCH_EXCLUDED_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+    "venv",
+    ".venv",
+    "dist",
+    "build",
+}
+SEARCH_MAX_FILES = 5000
 
 
 class _ReasoningStreamParser:
@@ -88,10 +125,20 @@ class _ReasoningStreamParser:
         return [(part, reasoning) for part, reasoning in output if part]
 
 
-_TOOL_CALL_TAG_RE = re.compile(r"</?tool_?call\s*>", re.IGNORECASE)
-_TOOL_CALL_START_RE = re.compile(r"<tool_?call\s*>", re.IGNORECASE)
-_TOOL_CALL_PREFIXES = ("<tool_call", "<toolcall")
-_TOOL_CALL_TAG_TAIL_LENGTH = len("</tool_call>") - 1
+_TOOL_CALL_TAG_RE = re.compile(
+    rf"</?(?:tool_?call|{DIRECT_TAG_TOOL_PATTERN})\b[^>]*>",
+    re.IGNORECASE,
+)
+_TOOL_CALL_START_RE = re.compile(
+    rf"<(?:tool_?call|{DIRECT_TAG_TOOL_PATTERN})\b[^>]*>",
+    re.IGNORECASE,
+)
+_TOOL_CALL_PREFIXES = tuple(
+    ["<tool_call", "<toolcall"] + [f"<{name}" for name in DIRECT_TAG_TOOL_NAMES]
+)
+_TOOL_CALL_TAG_TAIL_LENGTH = max(
+    [len("</tool_call>")] + [len(f"</{name}>") for name in DIRECT_TAG_TOOL_NAMES]
+) - 1
 
 
 class _ToolCallStreamFilter:
@@ -285,6 +332,16 @@ class MimoWebClient:
             "bash",
             "read",
             "glob",
+            "grep",
+            "memory",
+            "webfetch",
+            "write",
+            "edit",
+            "history",
+            "task",
+            "question",
+            "actor",
+            "workflow",
             "whoami",
             "date",
             "pwd",
@@ -327,6 +384,17 @@ class MimoWebClient:
             "</function></tool_call>\n"
             "<tool_call><function=glob><parameter=pattern>**/*.py</parameter>"
             "</function></tool_call>\n\n"
+            "For grep and memory, use parameters like:\n"
+            "<tool_call><function=grep><parameter=pattern>TODO</parameter>"
+            "<parameter=path>app</parameter></function></tool_call>\n"
+            "<tool_call><function=memory><parameter=action>remember</parameter>"
+            "<parameter=content>Important project fact</parameter></function>"
+            "</tool_call>\n\n"
+            "Direct tags are also accepted for compatibility, for example:\n"
+            "<webfetch>{\"url\":\"https://example.com\",\"format\":\"text\"}"
+            "</webfetch>\n"
+            "<question>{\"questions\":[{\"question\":\"Pick one\"}]}"
+            "</question>\n\n"
             "Do not wrap tool calls in Markdown fences. Do not explain the "
             "tool call before emitting it. After tool results are returned, "
             "continue from the results.\n"
@@ -575,6 +643,29 @@ class MimoWebClient:
             return default
 
     @staticmethod
+    def _tool_bool_arg(args: dict, default: bool, *names: str) -> bool:
+        text = MimoWebClient._tool_arg(args, *names).lower()
+        if not text:
+            return default
+        return text in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _tool_list_arg(args: dict, *names: str) -> list[str]:
+        for name in names:
+            value = args.get(name)
+            if value is None:
+                continue
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            if isinstance(value, str):
+                parts = [part.strip() for part in value.split(",")]
+                return [part for part in parts if part]
+            text = str(value).strip()
+            if text:
+                return [text]
+        return []
+
+    @staticmethod
     def _truncate_tool_output(content: str) -> str:
         if len(content) <= TOOL_OUTPUT_MAX_CHARS:
             return content
@@ -678,6 +769,349 @@ class MimoWebClient:
             lines.append("[no matches]")
         return cls._truncate_tool_output("\n".join(lines))
 
+    @classmethod
+    def _grep_tool_content(cls, args: dict) -> str:
+        pattern = cls._tool_arg(args, "pattern", "regex", "query", "search")
+        if not pattern:
+            return "Tool execution failed: missing pattern parameter."
+
+        root = cls._tool_arg(args, "cwd", "root", "directory", "dir")
+        path_args = cls._tool_list_arg(args, "path", "paths", "file", "files")
+        include_patterns = cls._tool_list_arg(args, "include", "glob", "file_glob")
+        if not path_args:
+            path_args = include_patterns or ["."]
+
+        case_sensitive = cls._tool_bool_arg(args, True, "case_sensitive")
+        if cls._tool_bool_arg(args, False, "ignore_case"):
+            case_sensitive = False
+        limit = max(1, cls._tool_int_arg(args, 200, "limit", "max_results"))
+        flags = 0 if case_sensitive else re.IGNORECASE
+
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as exc:
+            return f"Tool execution failed: invalid regex: {exc}"
+
+        files = cls._grep_candidate_files(path_args, root)
+        lines = [f"$ grep {shlex.quote(pattern)}"]
+        matches = 0
+        scanned = 0
+        for path in files:
+            if scanned >= SEARCH_MAX_FILES or matches >= limit:
+                break
+            scanned += 1
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as file:
+                    for line_number, line in enumerate(file, start=1):
+                        if regex.search(line):
+                            lines.append(
+                                f"{path}:{line_number}:{line.rstrip()}"
+                            )
+                            matches += 1
+                            if matches >= limit:
+                                break
+            except (OSError, UnicodeError):
+                continue
+
+        if not matches:
+            lines.append("[no matches]")
+        if matches >= limit:
+            lines.append(f"[grep output truncated after {limit} matches]")
+        if scanned >= SEARCH_MAX_FILES:
+            lines.append(f"[grep scan truncated after {SEARCH_MAX_FILES} files]")
+        return cls._truncate_tool_output("\n".join(lines))
+
+    @classmethod
+    def _grep_candidate_files(cls, path_args: list[str], root: str = "") -> list[Path]:
+        root_path = Path(root).expanduser() if root else None
+        files: list[Path] = []
+        for raw_path in path_args:
+            path = Path(raw_path).expanduser()
+            if root_path and not path.is_absolute():
+                path = root_path / path
+
+            matches = globlib.glob(str(path), recursive=True)
+            if matches:
+                for match in matches:
+                    files.extend(cls._walk_search_path(Path(match)))
+            else:
+                files.extend(cls._walk_search_path(path))
+
+        unique = {}
+        for path in files:
+            try:
+                unique[str(path.resolve())] = path
+            except OSError:
+                unique[str(path)] = path
+        return sorted(unique.values(), key=lambda item: str(item))
+
+    @classmethod
+    def _walk_search_path(cls, path: Path) -> list[Path]:
+        if path.is_file():
+            return [path]
+        if not path.is_dir():
+            return []
+
+        files = []
+        for child in path.rglob("*"):
+            if any(part in SEARCH_EXCLUDED_DIRS for part in child.parts):
+                continue
+            if child.is_file():
+                files.append(child)
+        return files
+
+    @classmethod
+    def _memory_tool_content(cls, args: dict) -> str:
+        action = cls._tool_arg(args, "action", "operation", "op", "mode").lower()
+        key = cls._tool_arg(args, "key", "id", "name")
+        content = cls._tool_arg(args, "content", "text", "value", "memory")
+        query = cls._tool_arg(args, "query", "search", "pattern")
+
+        if not action:
+            if content:
+                action = "remember"
+            elif query or key:
+                action = "search"
+            else:
+                action = "list"
+
+        records = cls._load_memory_records()
+        if action in {"remember", "save", "add", "set", "write"}:
+            if not content:
+                return "Tool execution failed: missing content parameter."
+            record = {
+                "id": key or f"mem_{uuid.uuid4().hex[:12]}",
+                "content": content,
+                "created_at": int(time.time()),
+            }
+            records = [item for item in records if item.get("id") != record["id"]]
+            records.append(record)
+            cls._save_memory_records(records)
+            return f"$ memory remember\nSaved memory {record['id']}: {content}"
+
+        if action in {"clear", "delete", "remove"}:
+            if key:
+                kept = [item for item in records if item.get("id") != key]
+                cls._save_memory_records(kept)
+                return f"$ memory delete\nDeleted {len(records) - len(kept)} record(s)."
+            cls._save_memory_records([])
+            return f"$ memory clear\nDeleted {len(records)} record(s)."
+
+        limit = max(1, cls._tool_int_arg(args, 20, "limit", "max_results"))
+        if action in {"search", "recall", "get", "read", "list"}:
+            needle = (query or key).lower()
+            if needle:
+                selected = [
+                    item for item in records
+                    if needle in str(item.get("id", "")).lower()
+                    or needle in str(item.get("content", "")).lower()
+                ]
+            else:
+                selected = records
+            selected = selected[-limit:]
+            lines = [f"$ memory {action}"]
+            if not selected:
+                lines.append("[no memories]")
+            for item in selected:
+                lines.append(f"{item.get('id')}: {item.get('content', '')}")
+            return cls._truncate_tool_output("\n".join(lines))
+
+        return f"Tool execution failed: unsupported memory action '{action}'."
+
+    @staticmethod
+    def _load_memory_records() -> list[dict]:
+        path = Path(MEMORY_PATH)
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return data if isinstance(data, list) else []
+
+    @staticmethod
+    def _save_memory_records(records: list[dict]) -> None:
+        path = Path(MEMORY_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(records, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    async def _webfetch_tool_content(cls, args: dict) -> str:
+        url = cls._tool_arg(args, "url", "uri", "href")
+        if not url:
+            return "Tool execution failed: missing url parameter."
+
+        method = cls._tool_arg(args, "method") or "GET"
+        method = method.upper()
+        output_format = (cls._tool_arg(args, "format", "type") or "text").lower()
+        headers = args.get("headers")
+        if isinstance(headers, str):
+            try:
+                headers = json.loads(headers)
+            except json.JSONDecodeError:
+                headers = {}
+        if not isinstance(headers, dict):
+            headers = {}
+
+        request_kwargs = {"headers": {str(k): str(v) for k, v in headers.items()}}
+        if args.get("json") is not None:
+            request_kwargs["json"] = args["json"]
+        elif args.get("body") is not None:
+            request_kwargs["content"] = str(args["body"])
+        elif args.get("data") is not None:
+            request_kwargs["content"] = str(args["data"])
+
+        lines = [f"$ webfetch {url}"]
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                follow_redirects=True,
+            ) as client:
+                response = await client.request(method, url, **request_kwargs)
+        except Exception as exc:
+            lines.append(f"Tool execution failed: {exc}")
+            return cls._truncate_tool_output("\n".join(lines))
+
+        lines.append(f"HTTP {response.status_code}")
+        content_type = response.headers.get("content-type")
+        if content_type:
+            lines.append(f"content-type: {content_type}")
+
+        text = response.text
+        if output_format == "json":
+            try:
+                text = json.dumps(response.json(), ensure_ascii=False, indent=2)
+            except ValueError:
+                pass
+        lines.append(text)
+        return cls._truncate_tool_output("\n".join(lines))
+
+    @classmethod
+    def _write_tool_content(cls, args: dict) -> str:
+        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        content = cls._tool_arg(args, "content", "text", "value", "input")
+        if not file_path:
+            return "Tool execution failed: missing path parameter."
+        if content == "":
+            return "Tool execution failed: missing content parameter."
+
+        path = Path(file_path).expanduser()
+        append = cls._tool_bool_arg(args, False, "append")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "a" if append else "w"
+            with path.open(mode, encoding="utf-8") as file:
+                file.write(content)
+        except OSError as exc:
+            return f"Tool execution failed: {exc}"
+
+        action = "appended" if append else "wrote"
+        return f"$ write {shlex.quote(str(path))}\n{action} {len(content)} characters"
+
+    @classmethod
+    def _edit_tool_content(cls, args: dict) -> str:
+        file_path = cls._tool_arg(args, "path", "file", "file_path", "filename")
+        old_text = cls._tool_arg(args, "old_string", "old", "search", "target")
+        new_text = cls._tool_arg(args, "new_string", "new", "replace", "replacement")
+        if not file_path:
+            return "Tool execution failed: missing path parameter."
+        if old_text == "":
+            return "Tool execution failed: missing old_string/search parameter."
+
+        path = Path(file_path).expanduser()
+        replace_all = cls._tool_bool_arg(args, False, "replace_all", "all")
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return f"Tool execution failed: {exc}"
+
+        occurrences = original.count(old_text)
+        if not occurrences:
+            return "Tool execution failed: search text was not found."
+
+        edited = (
+            original.replace(old_text, new_text)
+            if replace_all
+            else original.replace(old_text, new_text, 1)
+        )
+        try:
+            path.write_text(edited, encoding="utf-8")
+        except OSError as exc:
+            return f"Tool execution failed: {exc}"
+
+        count = occurrences if replace_all else 1
+        return f"$ edit {shlex.quote(str(path))}\nreplaced {count} occurrence(s)"
+
+    @classmethod
+    def _history_tool_content(cls, args: dict) -> str:
+        query = cls._tool_arg(args, "query", "search", "pattern")
+        lines = ["$ history"]
+        if query:
+            lines.append(f"query: {query}")
+        lines.append(
+            "Persistent chat history search is not configured in this API process."
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def _task_tool_content(cls, args: dict) -> str:
+        operation = args.get("operation")
+        if isinstance(operation, dict):
+            action = str(operation.get("action") or "list").lower()
+        else:
+            action = cls._tool_arg(args, "action", "operation") or "list"
+            action = action.lower()
+
+        lines = [f"$ task {action}"]
+        if action == "list":
+            lines.append("[]")
+        else:
+            lines.append(
+                "Task tool is recognized, but no local task backend is configured."
+            )
+        return "\n".join(lines)
+
+    @classmethod
+    def _question_tool_content(cls, args: dict) -> str:
+        questions = args.get("questions")
+        if not isinstance(questions, list):
+            question = cls._tool_arg(args, "question", "prompt", "input")
+            questions = [{"question": question}] if question else []
+
+        lines = ["$ question"]
+        if not questions:
+            lines.append("No questions were provided.")
+        for index, item in enumerate(questions, start=1):
+            if not isinstance(item, dict):
+                lines.append(f"{index}. {item}")
+                continue
+            prompt = item.get("question") or item.get("prompt") or ""
+            lines.append(f"{index}. {prompt}")
+            options = item.get("options")
+            if isinstance(options, list) and options:
+                first = options[0]
+                if isinstance(first, dict):
+                    label = first.get("label") or first.get("value") or ""
+                else:
+                    label = str(first)
+                lines.append(f"default_option: {label}")
+        lines.append(
+            "Interactive user input is unavailable through this API; continue with a sensible default."
+        )
+        return cls._truncate_tool_output("\n".join(lines))
+
+    @classmethod
+    def _capability_stub_tool_content(cls, name: str, args: dict) -> str:
+        action = cls._tool_arg(args, "action", "operation", "name")
+        suffix = f" {action}" if action else ""
+        return (
+            f"$ {name}{suffix}\n"
+            f"{name} is recognized, but no local {name} backend is configured."
+        )
+
     async def _execute_tool_call(self, tool_call: dict) -> dict:
         name = str(tool_call.get("function", {}).get("name", "")).strip()
         normalized_name = name.lower()
@@ -698,6 +1132,78 @@ class MimoWebClient:
 
         if normalized_name in GLOB_TOOL_NAMES:
             lines.append(await asyncio.to_thread(self._glob_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in GREP_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._grep_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in MEMORY_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._memory_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in WEBFETCH_TOOL_NAMES:
+            lines.append(await self._webfetch_tool_content(args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in WRITE_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._write_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in EDIT_TOOL_NAMES:
+            lines.append(await asyncio.to_thread(self._edit_tool_content, args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in HISTORY_TOOL_NAMES:
+            lines.append(self._history_tool_content(args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in QUESTION_TOOL_NAMES:
+            lines.append(self._question_tool_content(args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in TASK_TOOL_NAMES:
+            lines.append(self._task_tool_content(args))
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "content": self._truncate_tool_output("\n".join(lines)),
+            }
+
+        if normalized_name in CAPABILITY_STUB_TOOL_NAMES:
+            lines.append(self._capability_stub_tool_content(normalized_name, args))
             return {
                 "role": "tool",
                 "tool_call_id": tool_call.get("id"),

@@ -25,6 +25,47 @@ _TOOL_CALL_JSON_RE = re.compile(
     r"<tool_?call>\s*(\{.*?\})\s*</tool_?call>",
     re.DOTALL | re.IGNORECASE,
 )
+_DIRECT_TOOL_NAMES = (
+    "actor",
+    "bash",
+    "cat",
+    "date",
+    "edit",
+    "find_files",
+    "file_read",
+    "glob",
+    "glob_files",
+    "grep",
+    "history",
+    "ls",
+    "memory",
+    "pwd",
+    "question",
+    "read",
+    "read_file",
+    "recall",
+    "remember",
+    "run_command",
+    "search",
+    "search_files",
+    "sh",
+    "shell",
+    "skill",
+    "task",
+    "terminal",
+    "time",
+    "uname",
+    "web_fetch",
+    "webfetch",
+    "whoami",
+    "workflow",
+    "write",
+)
+_DIRECT_TOOL_PATTERN = "|".join(re.escape(name) for name in _DIRECT_TOOL_NAMES)
+_DIRECT_TOOL_RE = re.compile(
+    rf"<(?P<name>{_DIRECT_TOOL_PATTERN})\b[^>]*>\s*(?P<body>.*?)\s*</(?P=name)>",
+    re.DOTALL | re.IGNORECASE,
+)
 _TOOL_PARAMETER_RE = re.compile(
     r"<parameter\s*=\s*([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
     re.DOTALL | re.IGNORECASE,
@@ -34,7 +75,7 @@ _TOOL_ARGUMENT_TAG_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _TOOL_CALL_TAG_RE = re.compile(
-    r"</?tool_?call\s*>",
+    rf"</?(?:tool_?call|{_DIRECT_TOOL_PATTERN})\b[^>]*>",
     re.IGNORECASE,
 )
 
@@ -114,6 +155,18 @@ def parse_xml_tool_call(content: str) -> Optional[list[dict]]:
             }),
         ))
 
+    for match in _DIRECT_TOOL_RE.finditer(content):
+        if _overlaps(match.span(), [span for _, span, _ in parsed]):
+            continue
+        function_name = match.group("name")
+        arguments = _parse_direct_tool_body(match.group("body"))
+        if arguments is not None:
+            parsed.append((
+                match.start(),
+                match.span(),
+                _build_tool_call(function_name, arguments),
+            ))
+
     if not parsed:
         return None
 
@@ -162,6 +215,31 @@ def _overlaps(span: tuple[int, int], existing: list[tuple[int, int]]) -> bool:
     return any(start < other_end and end > other_start for other_start, other_end in existing)
 
 
+def _parse_direct_tool_body(body: str) -> Optional[dict]:
+    body = body.strip()
+    if not body:
+        return {}
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    if payload is not None:
+        return {"input": payload}
+
+    params = _parse_tool_parameters(body, _TOOL_PARAMETER_RE)
+    if params is not None:
+        return params
+
+    params = _parse_tool_parameters(body, _TOOL_ARGUMENT_TAG_RE)
+    if params is not None:
+        return params
+
+    return {"input": unescape(body)}
+
+
 def _parse_tool_parameters(body: str, pattern: re.Pattern) -> Optional[dict[str, str]]:
     params: dict[str, str] = {}
     consumed_spans = []
@@ -185,7 +263,7 @@ def _parse_tool_parameters(body: str, pattern: re.Pattern) -> Optional[dict[str,
     return params
 
 
-def _build_tool_call(function_name: str, params: dict[str, str]) -> dict:
+def _build_tool_call(function_name: str, params: dict) -> dict:
     return {
         "id": f"call_{uuid.uuid4().hex[:24]}",
         "type": "function",

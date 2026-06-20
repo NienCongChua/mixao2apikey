@@ -296,7 +296,10 @@ Runtime limits:
 <table>
   <tr><td>Shell tools</td><td><code>bash</code>, <code>sh</code>, <code>shell</code>, <code>terminal</code>, <code>run_command</code></td></tr>
   <tr><td>Direct shell aliases</td><td><code>whoami</code>, <code>date</code>, <code>pwd</code>, <code>ls</code>, <code>uname</code>, <code>git</code>, <code>get_time</code></td></tr>
-  <tr><td>File tools</td><td><code>read</code>, <code>read_file</code>, <code>glob</code>, <code>glob_files</code></td></tr>
+  <tr><td>File/search tools</td><td><code>read</code>, <code>read_file</code>, <code>glob</code>, <code>glob_files</code>, <code>grep</code>, <code>search_files</code>, <code>write</code>, <code>edit</code></td></tr>
+  <tr><td>Network tools</td><td><code>webfetch</code>, <code>web_fetch</code></td></tr>
+  <tr><td>Memory tools</td><td><code>memory</code>, <code>remember</code>, <code>recall</code></td></tr>
+  <tr><td>Recognized compatibility stubs</td><td><code>history</code>, <code>task</code>, <code>question</code>, <code>actor</code>, <code>workflow</code>, <code>skill</code></td></tr>
   <tr><td>Timeout</td><td><code>120</code> seconds per command</td></tr>
   <tr><td>Output cap</td><td><code>20000</code> characters per tool result</td></tr>
   <tr><td>Max rounds</td><td><code>3</code> automatic tool rounds per request</td></tr>
@@ -379,6 +382,7 @@ Executing bash tool call: <command>
     <tr><td><code>credentials.json</code></td><td>MiMo cookies and request metadata.</td><td>No</td></tr>
     <tr><td><code>api_keys.json</code></td><td>Local bearer keys for <code>/v1/*</code>.</td><td>No</td></tr>
     <tr><td><code>usage_stats.json</code></td><td>Persistent usage counters.</td><td>No</td></tr>
+    <tr><td><code>memory.json</code></td><td>Local memory tool store.</td><td>No</td></tr>
   </tbody>
 </table>
 

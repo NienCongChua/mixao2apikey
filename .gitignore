@@ -1,6 +1,7 @@
 credentials.json
 api_keys.json
 usage_stats.json
+memory.json
 venv
 .pytest_cache
 app.log
